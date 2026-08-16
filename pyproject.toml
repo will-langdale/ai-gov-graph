@@ -5,6 +5,8 @@ description = "Progressively discover and build a GOV.UK knowledge graph using A
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "langchain-openrouter>=0.1.0",
+    "langgraph>=1.0.0",
     "typer>=0.27.1",
 ]
 
