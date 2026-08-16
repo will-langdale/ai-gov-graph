@@ -8,8 +8,23 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias, cast
 
 from langchain_openrouter import ChatOpenRouter
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
+
+
+class OpenRouterSettings(BaseSettings):
+    """Local OpenRouter configuration with a non-serialisable API credential."""
+
+    model: str = "deepseek/deepseek-v4-pro"
+    api_key: SecretStr = Field(alias="OPENROUTER_API_KEY", repr=False)
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    def configuration(self, parameters: dict[str, JsonValue]) -> ModelConfiguration:
+        """Return durable model identity without copying the API credential."""
+        return ModelConfiguration("openrouter", self.model, parameters)
 
 
 @dataclass(frozen=True)
@@ -138,9 +153,19 @@ _JSON_OBJECT_SCHEMA: dict[str, Any] = {
 class OpenRouterStructuredModel:
     """Invoke OpenRouter through LangChain at the structured-model boundary."""
 
-    def __init__(self, model_factory: OpenRouterModelFactory | None = None) -> None:
+    def __init__(
+        self,
+        model_factory: OpenRouterModelFactory | None = None,
+        settings: OpenRouterSettings | None = None,
+    ) -> None:
         """Create an adapter with the real LangChain factory by default."""
-        self._model_factory = model_factory or _create_openrouter_chat_model
+        if model_factory is not None:
+            self._model_factory = model_factory
+            return
+        configured = settings or OpenRouterSettings()
+        self._model_factory = lambda model, parameters: _create_openrouter_chat_model(
+            model, parameters, configured.api_key
+        )
 
     def invoke(
         self,
@@ -182,10 +207,17 @@ class OpenRouterStructuredModel:
 
 
 def _create_openrouter_chat_model(
-    model: str, parameters: dict[str, Any]
+    model: str, parameters: dict[str, Any], api_key: SecretStr
 ) -> OpenRouterChatModel:
     """Create the LangChain OpenRouter chat model without handling credentials."""
-    return cast(OpenRouterChatModel, ChatOpenRouter(model=model, **parameters))
+    return cast(
+        OpenRouterChatModel,
+        ChatOpenRouter(
+            model=model,
+            api_key=api_key.get_secret_value(),
+            **parameters,
+        ),
+    )
 
 
 def _structured_input_message(structured_input: JsonValue) -> str:

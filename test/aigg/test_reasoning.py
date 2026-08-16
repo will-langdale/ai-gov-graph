@@ -9,6 +9,7 @@ from aigg.artefacts import ArtefactStore, JsonValue
 from aigg.reasoning import (
     ModelConfiguration,
     OpenRouterInvocationError,
+    OpenRouterSettings,
     OpenRouterStructuredModel,
     ReasoningInvocationError,
     ReasoningProviderError,
@@ -95,6 +96,25 @@ class StaticChatModel:
         """Retain the OpenRouter request and return JSON content."""
         self.messages.append(messages)
         return self.output
+
+
+def test_methodology_openrouter_settings_default_model() -> None:
+    """Local OpenRouter settings load a secret without recording it as configuration.
+
+    Guards the live reasoning default from drifting from the selected DeepSeek
+    model or serialising an API credential into a durable invocation record.
+    """
+    settings = OpenRouterSettings(
+        OPENROUTER_API_KEY="secret",
+        _env_file=None,
+    )
+
+    assert settings.model == "deepseek/deepseek-v4-pro"
+    assert settings.configuration({"temperature": 0}) == ModelConfiguration(
+        "openrouter",
+        "deepseek/deepseek-v4-pro",
+        {"temperature": 0},
+    )
 
 
 def test_methodology_configured_output() -> None:
