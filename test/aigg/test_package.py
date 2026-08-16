@@ -1,7 +1,7 @@
 """Tests for the public package interface."""
 
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 import aigg
 

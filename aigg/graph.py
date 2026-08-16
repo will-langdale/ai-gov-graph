@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 import typer
+from pyoxigraph import Literal, NamedNode, Quad, RdfFormat, Store
 
 from aigg.artefacts import (
     ARTEFACT_SCHEMA_VERSION,
@@ -16,6 +19,17 @@ from aigg.artefacts import (
 )
 
 LINEAGE_SCHEMA_VERSION = "1"
+RDF_TYPE = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+RDF_JSON = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON")
+AIGG = "https://w3id.org/aigg/"
+DOCUMENTS_GRAPH = NamedNode(f"{AIGG}graph/source-documents")
+SOURCE_DOCUMENT = NamedNode(f"{AIGG}SourceDocument")
+SOURCE_ASSERTION = NamedNode(f"{AIGG}SourceAssertion")
+ABOUT = NamedNode(f"{AIGG}about")
+SOURCE_KEY = NamedNode(f"{AIGG}sourceKey")
+SOURCE_VALUE = NamedNode(f"{AIGG}sourceValue")
+SOURCE_JSON = NamedNode(f"{AIGG}sourceJson")
+SOURCE_VERSION = NamedNode(f"{AIGG}sourceVersion")
 
 app = typer.Typer(
     help="Run graph construction against locally acquired evidence.",
@@ -83,11 +97,169 @@ def initialise(
 
 
 @documents_app.command()
-def run() -> None:
-    """Describe the graph construction boundary until processing is implemented."""
-    msg = "Graph construction is not implemented yet. No local evidence was processed."
-    typer.echo(msg, err=True)
-    raise typer.Exit(1)
+def run(
+    corpus_directory: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=False,
+            readable=True,
+            help="Complete manifest-backed evidence corpus to project.",
+        ),
+    ],
+    dataset_path: Annotated[
+        Path,
+        typer.Option(
+            help="TriG dataset file written from the retained source documents."
+        ),
+    ],
+) -> None:
+    """Project retained Source documents into a named RDF graph."""
+    try:
+        source_documents = _read_source_documents(corpus_directory)
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="--corpus-directory") from error
+
+    store = Store()
+    store.extend(_source_document_quads(source_documents))
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    store.dump(output=dataset_path, format=RdfFormat.TRIG)
+    typer.echo(f"Projected source documents: {dataset_path}")
+
+
+def _read_source_documents(
+    corpus_directory: Path,
+) -> list[tuple[dict[str, object], bytes]]:
+    """Read the retained source versions listed in one complete corpus manifest."""
+    manifest_path = corpus_directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+    except FileNotFoundError as error:
+        msg = f"Corpus manifest is missing: {manifest_path}"
+        raise ValueError(msg) from error
+    except json.JSONDecodeError as error:
+        msg = f"Corpus manifest is not valid JSON: {manifest_path}"
+        raise ValueError(msg) from error
+
+    if not isinstance(manifest, dict) or manifest.get("status") != "complete":
+        msg = f"Corpus manifest is not complete: {manifest_path}"
+        raise ValueError(msg)
+    entries = manifest.get("source_documents")
+    if not isinstance(entries, list):
+        msg = f"Corpus manifest has no source documents: {manifest_path}"
+        raise ValueError(msg)
+
+    source_documents: list[tuple[dict[str, object], bytes]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            msg = "Corpus manifest contains an invalid source document entry."
+            raise ValueError(msg)
+        source_documents.append((entry, _read_source_document(corpus_directory, entry)))
+    return source_documents
+
+
+def _read_source_document(corpus_directory: Path, entry: dict[str, object]) -> bytes:
+    """Read and verify one immutable source JSON document from a manifest entry."""
+    source_json = entry.get("source_json")
+    source_json_sha256 = entry.get("source_json_sha256")
+    if not isinstance(source_json, str) or not isinstance(source_json_sha256, str):
+        msg = "Corpus manifest source document lacks its JSON identity."
+        raise ValueError(msg)
+    path = corpus_directory / source_json
+    if not path.is_relative_to(corpus_directory):
+        msg = "Corpus manifest source document escapes the corpus directory."
+        raise ValueError(msg)
+    try:
+        source = path.read_bytes()
+    except FileNotFoundError as error:
+        msg = f"Retained source document is missing: {path}"
+        raise ValueError(msg) from error
+    if sha256(source).hexdigest() != source_json_sha256:
+        msg = f"Retained source document does not match its manifest identity: {path}"
+        raise ValueError(msg)
+    return source
+
+
+def _source_document_quads(
+    source_documents: list[tuple[dict[str, object], bytes]],
+) -> list[Quad]:
+    """Return the source assertions for every retained Source document version."""
+    quads: list[Quad] = []
+    for entry, source_bytes in source_documents:
+        source = _parse_source_document(source_bytes)
+        document = _document_node(entry)
+        quads.extend(
+            [
+                Quad(document, RDF_TYPE, SOURCE_DOCUMENT, DOCUMENTS_GRAPH),
+                Quad(
+                    document,
+                    SOURCE_JSON,
+                    Literal(source_bytes.decode("utf-8"), datatype=RDF_JSON),
+                    DOCUMENTS_GRAPH,
+                ),
+                Quad(
+                    document,
+                    SOURCE_VERSION,
+                    Literal(_source_version(entry)),
+                    DOCUMENTS_GRAPH,
+                ),
+            ]
+        )
+        for key, value in source.items():
+            assertion = NamedNode(f"{document.value}/assertion/{quote(key, safe='')}")
+            quads.extend(
+                [
+                    Quad(assertion, RDF_TYPE, SOURCE_ASSERTION, DOCUMENTS_GRAPH),
+                    Quad(assertion, ABOUT, document, DOCUMENTS_GRAPH),
+                    Quad(assertion, SOURCE_KEY, Literal(key), DOCUMENTS_GRAPH),
+                    Quad(
+                        assertion,
+                        SOURCE_VALUE,
+                        Literal(
+                            json.dumps(
+                                value, ensure_ascii=False, separators=(",", ":")
+                            ),
+                            datatype=RDF_JSON,
+                        ),
+                        DOCUMENTS_GRAPH,
+                    ),
+                ]
+            )
+    return quads
+
+
+def _parse_source_document(source_bytes: bytes) -> dict[str, object]:
+    """Decode one retained GOV.UK source document without replacing its bytes."""
+    try:
+        source = json.loads(source_bytes)
+    except json.JSONDecodeError as error:
+        msg = "Retained source document is not valid JSON."
+        raise ValueError(msg) from error
+    if not isinstance(source, dict):
+        msg = "Retained source document must be a JSON object."
+        raise ValueError(msg)
+    return source
+
+
+def _document_node(entry: dict[str, object]) -> NamedNode:
+    """Return the stable RDF resource for one immutable Source document version."""
+    content_id = entry.get("content_id")
+    source_json_sha256 = entry.get("source_json_sha256")
+    if not isinstance(content_id, str) or not isinstance(source_json_sha256, str):
+        msg = "Corpus manifest source document lacks its RDF identity."
+        raise ValueError(msg)
+    return NamedNode(
+        f"{AIGG}source-document/{quote(content_id, safe='')}/{source_json_sha256}"
+    )
+
+
+def _source_version(entry: dict[str, object]) -> str:
+    """Return the manifest's immutable source-version identifier."""
+    source_version = entry.get("source_version")
+    if not isinstance(source_version, str):
+        msg = "Corpus manifest source document lacks its source version."
+        raise ValueError(msg)
+    return source_version
 
 
 def _reference_data(reference: ArtefactReference) -> dict[str, str]:

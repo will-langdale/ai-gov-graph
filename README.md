@@ -122,3 +122,18 @@ canonical hashes, and canonicaliser version that identify each source version.
 A non-empty corpus directory is refused. Failed acquisitions produce
 `acquisition-failure.json` and no manifest, so partial evidence cannot be
 mistaken for a complete corpus.
+
+Project the retained Source documents in a complete corpus into a named-graph
+TriG RDF dataset:
+
+```shell
+uv run aigg graph documents run \
+  --corpus-directory evidence/department-for-business-and-trade \
+  --dataset-path source-documents.trig
+```
+
+The dataset retains each Source document version as a first-class resource. Its
+original JSON and each top-level JSON value are stored as source assertions in
+the source-documents graph. This preserves GOV.UK schemas, document types,
+taxons, organisations, links and publication metadata without asserting them
+as semantic classes.

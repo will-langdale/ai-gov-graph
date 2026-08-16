@@ -1,9 +1,8 @@
 """Tests for the short command line entry point."""
 
 import pytest
-from typer.testing import CliRunner
-
 from aigg.cli import app
+from typer.testing import CliRunner
 
 
 @pytest.mark.parametrize(
