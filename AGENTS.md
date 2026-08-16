@@ -16,6 +16,12 @@ Run the relevant `just` recipe before handing over a change. Use `just format` f
 
 ## Agent skills
 
+### Experiment CLI
+
+When extending source acquisition or graph construction workflows, preserve their
+separate Typer applications and explicit evidence boundaries. Read the
+[Commands section](README.md#commands) for the command shape and lineage contract.
+
 ### Issue tracker
 
 Issues and specs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
