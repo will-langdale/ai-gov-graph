@@ -10,6 +10,9 @@ from typing import Literal, Protocol, TypeAlias
 from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
 from aigg.canonical import EvidenceAnchor
 from aigg.open_extraction import ExtractedMention
+from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
+
+ENTITY_RESOLUTION_STAGE = "entity-resolution"
 
 
 class EntityResolutionValidationError(ValueError):
@@ -40,6 +43,7 @@ class ResolutionProvenance:
     methodology: str
     rationale: str
     evidence: tuple[EvidenceAnchor, ...]
+    reasoning_invocation: ArtefactReference | None = None
 
     def __post_init__(self) -> None:
         """Require a stated method, rationale and retained supporting Evidence."""
@@ -51,11 +55,14 @@ class ResolutionProvenance:
 
     def as_json(self) -> dict[str, JsonValue]:
         """Return the durable provenance representation."""
-        return {
+        value: dict[str, JsonValue] = {
             "evidence": [anchor.as_json() for anchor in self.evidence],
             "methodology": self.methodology,
             "rationale": self.rationale,
         }
+        if self.reasoning_invocation is not None:
+            value["reasoning_invocation"] = _reference_json(self.reasoning_invocation)
+        return value
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,171 @@ class RecordedResolution(RecordedEntityDecision):
     """One stored Resolver result and the resulting history head."""
 
     outcome: ResolutionOutcome
+
+
+@dataclass(frozen=True)
+class RecordedEntityResolution:
+    """One resolver result represented by durable result and history references."""
+
+    history: ArtefactReference
+    outcome: ResolutionOutcome
+    reasoning_invocation: ArtefactReference
+    reference: ArtefactReference
+
+
+@dataclass(frozen=True)
+class _RecordedReasonedEntityOutcome:
+    """One validated structured outcome and its invocation record."""
+
+    invocation: ArtefactReference
+    outcome: ResolutionOutcome
+
+
+class OpenRouterEntityResolver:
+    """Resolve bounded Entity candidates through recorded structured reasoning."""
+
+    def __init__(
+        self,
+        store: ArtefactStore,
+        model: StructuredModel,
+        configuration: ModelConfiguration,
+        *,
+        maximum_attempts: int,
+    ) -> None:
+        """Create an OpenRouter resolver with an explicit retry bound."""
+        self._runner = ReasoningRunner(
+            store, model, configuration, maximum_attempts=maximum_attempts
+        )
+
+    def resolve(self, context: ResolutionContext) -> ResolutionOutcome:
+        """Return one validated outcome for a bounded candidate context."""
+        return self.resolve_recorded(context).outcome
+
+    def resolve_recorded(
+        self, context: ResolutionContext
+    ) -> _RecordedReasonedEntityOutcome:
+        """Run and retain the one structured Entity decision for ``context``."""
+        invocation = self._runner.run(
+            stage=ENTITY_RESOLUTION_STAGE,
+            structured_input=_context_json(context),
+            validate_output=lambda value: _validated_structured_output(value, context),
+        )
+        return _RecordedReasonedEntityOutcome(
+            invocation.reference,
+            _outcome_from_structured(invocation.output, context, invocation.reference),
+        )
+
+
+class EntityResolutionService:
+    """Record and replay OpenRouter Entity decisions from durable requests."""
+
+    def __init__(
+        self,
+        store: ArtefactStore,
+        model: StructuredModel,
+        configuration: ModelConfiguration,
+        *,
+        maximum_attempts: int,
+    ) -> None:
+        """Create a service whose durable store is the resolution authority."""
+        self._store = store
+        self._resolver = OpenRouterEntityResolver(
+            store, model, configuration, maximum_attempts=maximum_attempts
+        )
+        self._history = EntityDecisionHistory(store)
+
+    def create_request(
+        self,
+        context: ResolutionContext,
+        history: ArtefactReference | None = None,
+    ) -> ArtefactReference:
+        """Store one bounded resolution request for a graph stage to reference."""
+        if history is not None:
+            self._history.inspect(history)
+        return self._store.write_json(
+            "entity-resolution-request",
+            {"context": _context_json(context), "history": _reference_json(history)},
+        )
+
+    def resolve_request(
+        self,
+        request: ArtefactReference,
+        *,
+        replay: ArtefactReference | None = None,
+    ) -> RecordedEntityResolution:
+        """Resolve a durable request, or consume its exact prior result."""
+        context, history = _request_from_json(self._store.read_json(request))
+        if replay is not None:
+            return self._replay(request, replay, context)
+
+        resolver_result = self._resolver.resolve_recorded(context)
+        recorded = self._history.resolve(
+            _OutcomeResolver(resolver_result.outcome), context, history
+        )
+        reference = self._store.write_json(
+            "entity-resolution",
+            {
+                "history": _reference_json(recorded.history),
+                "reasoning_invocation": _reference_json(
+                    resolver_result.outcome.provenance.reasoning_invocation
+                ),
+                "request": _reference_json(request),
+            },
+        )
+        invocation = resolver_result.outcome.provenance.reasoning_invocation
+        assert invocation is not None
+        return RecordedEntityResolution(
+            recorded.history, recorded.outcome, invocation, reference
+        )
+
+    def _replay(
+        self,
+        request: ArtefactReference,
+        replay: ArtefactReference,
+        context: ResolutionContext,
+    ) -> RecordedEntityResolution:
+        """Read an exact prior result without invoking the configured model."""
+        value = self._store.read_json(replay)
+        if not isinstance(value, dict) or set(value) != {
+            "history",
+            "reasoning_invocation",
+            "request",
+        }:
+            msg = "Entity resolution artefact has an invalid shape."
+            raise EntityResolutionValidationError(msg)
+        if _reference_from_json(value["request"]) != request:
+            msg = "Entity resolution replay belongs to a different request."
+            raise EntityResolutionValidationError(msg)
+        history = _reference_from_json(value["history"])
+        invocation = _reference_from_json(value["reasoning_invocation"])
+        if history is None or invocation is None:
+            msg = "Entity resolution replay must retain durable references."
+            raise EntityResolutionValidationError(msg)
+        decisions = self._history.inspect(history)
+        if not decisions or decisions[-1].kind != "resolution":
+            msg = "Entity resolution replay has no recorded resolution decision."
+            raise EntityResolutionValidationError(msg)
+        outcome = decisions[-1].outcome
+        if outcome is None:
+            msg = "Entity resolution replay has no recorded outcome."
+            raise EntityResolutionValidationError(msg)
+        self._history._validate_outcome(outcome, context)
+        if outcome.provenance.reasoning_invocation != invocation:
+            msg = "Entity resolution replay has mismatched reasoning provenance."
+            raise EntityResolutionValidationError(msg)
+        return RecordedEntityResolution(history, outcome, invocation, replay)
+
+
+@dataclass(frozen=True)
+class _OutcomeResolver:
+    """Present one recorded outcome at the Entity history's Resolver seam."""
+
+    outcome: ResolutionOutcome
+
+    def resolve(self, context: ResolutionContext) -> ResolutionOutcome:
+        """Return the outcome that the reasoning boundary already validated."""
+        del context
+        return self.outcome
 
 
 class EntityDecisionHistory:
@@ -501,11 +673,10 @@ def _decision_from_json(value: JsonValue) -> EntityDecision:
 
 def _provenance_from_json(value: JsonValue) -> ResolutionProvenance:
     """Parse retained resolution provenance."""
-    if not isinstance(value, dict) or set(value) != {
-        "evidence",
-        "methodology",
-        "rationale",
-    }:
+    if not isinstance(value, dict) or set(value) not in (
+        {"evidence", "methodology", "rationale"},
+        {"evidence", "methodology", "rationale", "reasoning_invocation"},
+    ):
         msg = "Entity decision contains invalid provenance."
         raise EntityResolutionValidationError(msg)
     evidence = _evidence_from_json(value["evidence"])
@@ -513,6 +684,11 @@ def _provenance_from_json(value: JsonValue) -> ResolutionProvenance:
         _string(value["methodology"], "Resolution methodology"),
         _string(value["rationale"], "Resolution rationale"),
         evidence,
+        (
+            None
+            if "reasoning_invocation" not in value
+            else _reference_from_json(value["reasoning_invocation"])
+        ),
     )
 
 
@@ -618,3 +794,95 @@ def _confidence_from_json(value: JsonValue | object) -> float:
 def _string(value: JsonValue | object, field: str) -> str:
     """Parse meaningful text from a durable JSON value."""
     return _require_text(value, field)
+
+
+def _context_json(context: ResolutionContext) -> dict[str, JsonValue]:
+    """Return the complete bounded input supplied to entity reasoning."""
+    return {
+        "candidates": [candidate.as_json() for candidate in context.candidates],
+        "maximum_candidates": context.maximum_candidates,
+        "mention": _mention_json(context.mention),
+    }
+
+
+def _request_from_json(
+    value: JsonValue,
+) -> tuple[ResolutionContext, ArtefactReference | None]:
+    """Load one stored entity-resolution request before following its history."""
+    if not isinstance(value, dict) or set(value) != {"context", "history"}:
+        msg = "Entity resolution request has an invalid shape."
+        raise EntityResolutionValidationError(msg)
+    context = value["context"]
+    if not isinstance(context, dict) or set(context) != {
+        "candidates",
+        "maximum_candidates",
+        "mention",
+    }:
+        msg = "Entity resolution request has an invalid context."
+        raise EntityResolutionValidationError(msg)
+    mention = _mention_from_json(context["mention"])
+    if mention is None:
+        msg = "Entity resolution request needs a mention."
+        raise EntityResolutionValidationError(msg)
+    candidates = _entities_from_json(context["candidates"])
+    maximum_candidates = context["maximum_candidates"]
+    if not isinstance(maximum_candidates, int) or isinstance(maximum_candidates, bool):
+        msg = "Entity resolution request maximum candidates must be an integer."
+        raise EntityResolutionValidationError(msg)
+    return ResolutionContext(
+        mention, candidates, maximum_candidates
+    ), _reference_from_json(value["history"])
+
+
+def _outcome_from_structured(
+    value: JsonValue,
+    context: ResolutionContext,
+    invocation: ArtefactReference | None = None,
+) -> ResolutionOutcome:
+    """Validate one model outcome against its bounded candidates and Evidence."""
+    if not isinstance(value, dict):
+        msg = "Entity resolution output must be an object."
+        raise EntityResolutionValidationError(msg)
+    kind = value.get("kind")
+    required = {"confidence", "evidence", "kind", "rationale"}
+    if kind == "existing":
+        required.add("entity_id")
+    elif kind == "provisional":
+        required.add("entity")
+    elif kind != "unresolved":
+        msg = "Entity resolution output has an invalid kind."
+        raise EntityResolutionValidationError(msg)
+    if set(value) != required:
+        msg = "Entity resolution output has an invalid shape."
+        raise EntityResolutionValidationError(msg)
+    evidence = _evidence_from_json(value["evidence"])
+    if not set(evidence).issubset(context.mention.evidence):
+        msg = "Entity resolution evidence must support the supplied mention."
+        raise EntityResolutionValidationError(msg)
+    provenance = ResolutionProvenance(
+        "openrouter-entity-resolution",
+        _string(value["rationale"], "Entity resolution rationale"),
+        evidence,
+        invocation,
+    )
+    confidence = _confidence_from_json(value["confidence"])
+    if kind == "existing":
+        outcome: ResolutionOutcome = ExistingEntityResolution(
+            _string(value["entity_id"], "Resolved Entity ID"), confidence, provenance
+        )
+    elif kind == "provisional":
+        outcome = ProvisionalEntityResolution(
+            _entity_from_json(value["entity"]), confidence, provenance
+        )
+    else:
+        outcome = UnresolvedResolution(confidence, provenance)
+    EntityDecisionHistory._validate_outcome(outcome, context)
+    return outcome
+
+
+def _validated_structured_output(
+    value: JsonValue, context: ResolutionContext
+) -> JsonValue:
+    """Keep validated model JSON in the reasoning record without coercing it."""
+    _outcome_from_structured(value, context)
+    return value

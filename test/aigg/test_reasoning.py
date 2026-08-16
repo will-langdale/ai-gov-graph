@@ -10,6 +10,8 @@ from aigg.reasoning import (
     ModelConfiguration,
     OpenRouterInvocationError,
     OpenRouterStructuredModel,
+    ReasoningInvocationError,
+    ReasoningProviderError,
     ReasoningRunner,
     ReasoningValidationError,
 )
@@ -53,6 +55,25 @@ class SequencedModel:
         self.calls.append(structured_input)
         self.configurations.append(configuration)
         return self.outputs.pop(0)
+
+
+@dataclass
+class FailingModel:
+    """Raise a controlled provider error at the external model boundary."""
+
+    calls: list[JsonValue]
+
+    def invoke(
+        self,
+        *,
+        configuration: ModelConfiguration,
+        structured_input: JsonValue,
+    ) -> JsonValue:
+        """Record the request then represent a provider transport failure."""
+        del configuration
+        self.calls.append(structured_input)
+        msg = "provider unavailable"
+        raise ReasoningProviderError(msg)
 
 
 @dataclass
@@ -215,6 +236,37 @@ def test_methodology_configuration_mutated_credential(tmp_path: Path) -> None:
         )
 
     assert not store.root.exists()
+
+
+def test_methodology_records_provider_failure(tmp_path: Path) -> None:
+    """Every failed provider call remains available for exact diagnosis.
+
+    Guards a transport failure from bypassing the durable reasoning boundary.
+    Uses a failing model because provider transport is an external boundary.
+    """
+    store = ArtefactStore(tmp_path / "artefacts")
+    model = FailingModel([])
+    runner = ReasoningRunner(
+        store,
+        model,
+        ModelConfiguration("example", "example-1", {"temperature": 0}),
+        maximum_attempts=2,
+    )
+
+    with pytest.raises(ReasoningInvocationError) as error:
+        runner.run(
+            stage="claim-extraction",
+            structured_input={"canonical_text": "The department has a minister."},
+            validate_output=_valid_claims,
+        )
+
+    assert len(model.calls) == 2
+    recorded = store.read_json(error.value.reference)
+    assert isinstance(recorded, dict)
+    assert recorded["retry_history"] == [
+        {"attempt": 1, "provider_error": "ReasoningProviderError"},
+        {"attempt": 2, "provider_error": "ReasoningProviderError"},
+    ]
 
 
 def test_methodology_recorded_output(tmp_path: Path) -> None:

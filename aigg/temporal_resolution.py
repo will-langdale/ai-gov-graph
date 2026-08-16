@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, cast
 
-from aigg.artefacts import JsonValue
+from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
 from aigg.canonical import EvidenceAnchor
+from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
+
+TEMPORAL_RESOLUTION_STAGE = "temporal-resolution"
 
 
 class TemporalResolutionValidationError(ValueError):
@@ -171,15 +175,31 @@ TemporalResolution: TypeAlias = (
 
 @dataclass(frozen=True)
 class TemporalResolutionContext:
-    """The expression and known reference time supplied to a temporal Resolver."""
+    """The expression and bounded Source and graph context for a Resolver."""
 
     expression: ExtractedTemporalExpression
     reference_time: datetime | None = None
+    source_context: tuple[dict[str, JsonValue], ...] = ()
+    graph_context: tuple[dict[str, JsonValue], ...] = ()
+    maximum_source_context: int = 8
+    maximum_graph_context: int = 8
 
     def __post_init__(self) -> None:
         """Ensure resolver input has retained source language and valid context."""
         _validate_expression(self.expression)
         _validate_boundary(self.reference_time, "Temporal reference time")
+        _validate_context_bound(
+            self.source_context, self.maximum_source_context, "Source context"
+        )
+        _validate_context_bound(
+            self.graph_context, self.maximum_graph_context, "Graph context"
+        )
+        object.__setattr__(
+            self, "source_context", _normalise_context(self.source_context, "Source")
+        )
+        object.__setattr__(
+            self, "graph_context", _normalise_context(self.graph_context, "Graph")
+        )
 
 
 class TemporalResolver(Protocol):
@@ -234,6 +254,123 @@ class CalendarTemporalResolver:
             TemporalConstraint.during(start, end),
             "iso-calendar",
             "The expression states its calendar period explicitly.",
+        )
+
+
+@dataclass(frozen=True)
+class RecordedTemporalResolution:
+    """One durable temporal result and its optional model invocation."""
+
+    outcome: TemporalResolution
+    reasoning_invocation: ArtefactReference | None
+    reference: ArtefactReference
+
+
+class OpenRouterTemporalResolver:
+    """Use calendar calculation first and structured model judgement when needed."""
+
+    def __init__(
+        self,
+        store: ArtefactStore,
+        model: StructuredModel,
+        configuration: ModelConfiguration,
+        *,
+        maximum_attempts: int,
+    ) -> None:
+        """Create a hybrid resolver with an explicit model retry bound."""
+        self._calendar = CalendarTemporalResolver()
+        self._runner = ReasoningRunner(
+            store, model, configuration, maximum_attempts=maximum_attempts
+        )
+
+    def resolve(self, context: TemporalResolutionContext) -> TemporalResolution:
+        """Return one deterministic or model-judged temporal outcome."""
+        return self.resolve_recorded(context)[0]
+
+    def resolve_recorded(
+        self, context: TemporalResolutionContext
+    ) -> tuple[TemporalResolution, ArtefactReference | None]:
+        """Return an outcome and the durable invocation when judgement was needed."""
+        deterministic = self._calendar.resolve(context)
+        if isinstance(deterministic, ResolvedTemporalExpression):
+            return deterministic, None
+        invocation = self._runner.run(
+            stage=TEMPORAL_RESOLUTION_STAGE,
+            structured_input=_context_json(context),
+            validate_output=lambda value: _validated_structured_output(value, context),
+        )
+        return _resolution_from_structured(
+            invocation.output, context
+        ), invocation.reference
+
+
+class TemporalResolutionService:
+    """Record and replay hybrid temporal results from durable stage requests."""
+
+    def __init__(
+        self,
+        store: ArtefactStore,
+        model: StructuredModel,
+        configuration: ModelConfiguration,
+        *,
+        maximum_attempts: int,
+    ) -> None:
+        """Create a service whose result artefacts are workflow authority."""
+        self._store = store
+        self._resolver = OpenRouterTemporalResolver(
+            store, model, configuration, maximum_attempts=maximum_attempts
+        )
+
+    def create_request(self, context: TemporalResolutionContext) -> ArtefactReference:
+        """Store one bounded temporal request for a graph node to reference."""
+        return self._store.write_json(
+            "temporal-resolution-request", _context_json(context)
+        )
+
+    def resolve_request(
+        self,
+        request: ArtefactReference,
+        *,
+        replay: ArtefactReference | None = None,
+    ) -> RecordedTemporalResolution:
+        """Resolve a durable request, or consume an exact stored result."""
+        context = _context_from_json(self._store.read_json(request))
+        if replay is not None:
+            return self._replay(request, replay)
+        outcome, invocation = self._resolver.resolve_recorded(context)
+        reference = self._store.write_json(
+            "temporal-resolution",
+            {
+                "outcome": outcome.as_json(),
+                "reasoning_invocation": _reference_json(invocation),
+                "request": _reference_json(request),
+            },
+        )
+        return RecordedTemporalResolution(outcome, invocation, reference)
+
+    def _replay(
+        self, request: ArtefactReference, replay: ArtefactReference
+    ) -> RecordedTemporalResolution:
+        """Read an exact result without calling the configured model."""
+        value = self._store.read_json(replay)
+        if not isinstance(value, dict) or set(value) != {
+            "outcome",
+            "reasoning_invocation",
+            "request",
+        }:
+            msg = "Temporal resolution artefact has an invalid shape."
+            raise TemporalResolutionValidationError(msg)
+        if _reference_from_json(value["request"]) != request:
+            msg = "Temporal resolution replay belongs to a different request."
+            raise TemporalResolutionValidationError(msg)
+        outcome = _resolution_from_json(
+            value["outcome"], _expression_from_json_required
+        )
+        if outcome is None:
+            msg = "Temporal resolution replay must retain an outcome."
+            raise TemporalResolutionValidationError(msg)
+        return RecordedTemporalResolution(
+            outcome, _reference_from_json(value["reasoning_invocation"]), replay
         )
 
 
@@ -424,3 +561,256 @@ def _require_text(value: object, field: str) -> str:
         msg = f"{field} must be a non-empty string."
         raise TemporalResolutionValidationError(msg)
     return value
+
+
+def _validate_context_bound(
+    context: tuple[dict[str, JsonValue], ...], maximum: int, name: str
+) -> None:
+    """Require a small, explicit context bound at the model boundary."""
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 0:
+        msg = f"{name} maximum must be a non-negative integer."
+        raise TemporalResolutionValidationError(msg)
+    if len(context) > maximum:
+        msg = f"{name} exceeds its stated maximum."
+        raise TemporalResolutionValidationError(msg)
+
+
+def _normalise_context(
+    context: tuple[dict[str, JsonValue], ...], name: str
+) -> tuple[dict[str, JsonValue], ...]:
+    """Copy JSON context so later caller mutation cannot expand the request."""
+    normalised: list[dict[str, JsonValue]] = []
+    for item in context:
+        if not isinstance(item, dict):
+            msg = f"{name} context items must be JSON objects."
+            raise TemporalResolutionValidationError(msg)
+        try:
+            copied = json.loads(json.dumps(item, allow_nan=False))
+        except (TypeError, ValueError) as error:
+            msg = f"{name} context items must be JSON-compatible."
+            raise TemporalResolutionValidationError(msg) from error
+        if not isinstance(copied, dict):
+            msg = f"{name} context items must be JSON objects."
+            raise TemporalResolutionValidationError(msg)
+        normalised.append(cast(dict[str, JsonValue], copied))
+    return tuple(normalised)
+
+
+def _context_json(context: TemporalResolutionContext) -> dict[str, JsonValue]:
+    """Return the complete bounded temporal input supplied to reasoning."""
+    return {
+        "expression": context.expression.as_json(),
+        "graph_context": list(context.graph_context),
+        "maximum_graph_context": context.maximum_graph_context,
+        "maximum_source_context": context.maximum_source_context,
+        "reference_time": (
+            None
+            if context.reference_time is None
+            else context.reference_time.isoformat()
+        ),
+        "source_context": list(context.source_context),
+    }
+
+
+def _context_from_json(value: JsonValue) -> TemporalResolutionContext:
+    """Load one durable temporal request before resolving it."""
+    if not isinstance(value, dict) or set(value) != {
+        "expression",
+        "graph_context",
+        "maximum_graph_context",
+        "maximum_source_context",
+        "reference_time",
+        "source_context",
+    }:
+        msg = "Temporal resolution request has an invalid shape."
+        raise TemporalResolutionValidationError(msg)
+    reference_time = value["reference_time"]
+    if reference_time is not None:
+        if not isinstance(reference_time, str):
+            msg = "Temporal reference time must be an ISO datetime or null."
+            raise TemporalResolutionValidationError(msg)
+        try:
+            parsed_reference = datetime.fromisoformat(reference_time)
+        except ValueError as error:
+            msg = "Temporal reference time must be an ISO datetime or null."
+            raise TemporalResolutionValidationError(msg) from error
+    else:
+        parsed_reference = None
+    return TemporalResolutionContext(
+        _expression_from_json_required(value["expression"]),
+        parsed_reference,
+        _context_items(value["source_context"], "Source"),
+        _context_items(value["graph_context"], "Graph"),
+        _maximum_from_json(value["maximum_source_context"], "Source"),
+        _maximum_from_json(value["maximum_graph_context"], "Graph"),
+    )
+
+
+def _context_items(value: JsonValue, name: str) -> tuple[dict[str, JsonValue], ...]:
+    """Parse bounded JSON context items from a durable request."""
+    if not isinstance(value, list):
+        msg = f"{name} context must be a list."
+        raise TemporalResolutionValidationError(msg)
+    return _normalise_context(tuple(value), name)
+
+
+def _maximum_from_json(value: JsonValue, name: str) -> int:
+    """Parse one explicit temporal context maximum."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        msg = f"{name} context maximum must be an integer."
+        raise TemporalResolutionValidationError(msg)
+    return value
+
+
+def _expression_from_json_required(value: JsonValue) -> ExtractedTemporalExpression:
+    """Parse source-supported temporal language from a durable record."""
+    if not isinstance(value, dict) or set(value) != {"evidence", "text"}:
+        msg = "Temporal expression has an invalid shape."
+        raise TemporalResolutionValidationError(msg)
+    evidence = value["evidence"]
+    if not isinstance(evidence, list) or not evidence:
+        msg = "Temporal expression must contain Evidence."
+        raise TemporalResolutionValidationError(msg)
+    try:
+        anchors = tuple(EvidenceAnchor.from_json(anchor) for anchor in evidence)
+    except ValueError as error:
+        raise TemporalResolutionValidationError(str(error)) from error
+    return ExtractedTemporalExpression(
+        anchors, _require_text(value["text"], "Temporal expression text")
+    )
+
+
+def _resolution_from_structured(
+    value: JsonValue, context: TemporalResolutionContext
+) -> TemporalResolution:
+    """Validate one model constraint against the original source expression."""
+    if not isinstance(value, dict):
+        msg = "Temporal resolution output must be an object."
+        raise TemporalResolutionValidationError(msg)
+    kind = value.get("kind")
+    if kind == "resolved" and set(value) == {
+        "constraint",
+        "evidence",
+        "kind",
+        "rationale",
+    }:
+        evidence = _model_evidence(value["evidence"], context)
+        contextual_evidence = _context_evidence(context)
+        if not set(evidence).intersection(contextual_evidence):
+            msg = "Relative temporal resolution must cite Source or graph Evidence."
+            raise TemporalResolutionValidationError(msg)
+        constraint = TemporalConstraint.from_json(value["constraint"])
+        if constraint not in _supported_constraints(context):
+            msg = (
+                "Temporal resolution constraint must match a comparable constraint "
+                "retained in Source or graph context."
+            )
+            raise TemporalResolutionValidationError(msg)
+        return ResolvedTemporalExpression(
+            context.expression,
+            constraint,
+            "openrouter-temporal-resolution",
+            _require_text(value["rationale"], "Temporal resolution rationale"),
+        )
+    if kind == "unresolved" and set(value) == {"kind", "rationale"}:
+        return UnresolvedTemporalExpression(
+            context.expression,
+            "openrouter-temporal-resolution",
+            _require_text(value["rationale"], "Temporal resolution rationale"),
+        )
+    msg = "Temporal resolution output has an invalid shape."
+    raise TemporalResolutionValidationError(msg)
+
+
+def _model_evidence(
+    value: JsonValue, context: TemporalResolutionContext
+) -> tuple[EvidenceAnchor, ...]:
+    """Require a model result to cite Evidence supplied in its bounded input."""
+    if not isinstance(value, list) or not value:
+        msg = "Temporal resolution output must cite Evidence."
+        raise TemporalResolutionValidationError(msg)
+    try:
+        evidence = tuple(EvidenceAnchor.from_json(anchor) for anchor in value)
+    except ValueError as error:
+        raise TemporalResolutionValidationError(str(error)) from error
+    available = set(context.expression.evidence).union(_context_evidence(context))
+    if not set(evidence).issubset(available):
+        msg = "Temporal resolution evidence is absent from the bounded context."
+        raise TemporalResolutionValidationError(msg)
+    return evidence
+
+
+def _context_evidence(
+    context: TemporalResolutionContext,
+) -> set[EvidenceAnchor]:
+    """Return every Evidence anchor retained by Source and graph context items."""
+    evidence: set[EvidenceAnchor] = set()
+    for item in (*context.source_context, *context.graph_context):
+        raw_evidence = item.get("evidence")
+        if raw_evidence is None:
+            continue
+        if not isinstance(raw_evidence, list) or not raw_evidence:
+            msg = "Temporal context Evidence must be a non-empty list."
+            raise TemporalResolutionValidationError(msg)
+        try:
+            evidence.update(EvidenceAnchor.from_json(anchor) for anchor in raw_evidence)
+        except ValueError as error:
+            raise TemporalResolutionValidationError(str(error)) from error
+    return evidence
+
+
+def _supported_constraints(
+    context: TemporalResolutionContext,
+) -> set[TemporalConstraint]:
+    """Return comparable constraints explicitly retained with contextual Evidence."""
+    constraints: set[TemporalConstraint] = set()
+    for item in (*context.source_context, *context.graph_context):
+        raw_constraint = item.get("constraint")
+        if raw_constraint is None:
+            continue
+        constraints.add(TemporalConstraint.from_json(raw_constraint))
+    return constraints
+
+
+def _validated_structured_output(
+    value: JsonValue, context: TemporalResolutionContext
+) -> JsonValue:
+    """Keep validated model JSON in the reasoning record without coercing it."""
+    _resolution_from_structured(value, context)
+    return value
+
+
+def _reference_json(
+    reference: ArtefactReference | None,
+) -> dict[str, str] | None:
+    """Return one optional artefact reference in durable form."""
+    if reference is None:
+        return None
+    return {
+        "identity": reference.identity,
+        "kind": reference.kind,
+        "schema_version": reference.schema_version,
+    }
+
+
+def _reference_from_json(value: JsonValue) -> ArtefactReference | None:
+    """Parse one optional artefact reference before following it."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "identity",
+        "kind",
+        "schema_version",
+    }:
+        msg = "Temporal resolution contains an invalid artefact reference."
+        raise TemporalResolutionValidationError(msg)
+    identity = value["identity"]
+    kind = value["kind"]
+    schema_version = value["schema_version"]
+    if not all(isinstance(item, str) for item in (identity, kind, schema_version)):
+        msg = "Temporal resolution artefact reference fields must be strings."
+        raise TemporalResolutionValidationError(msg)
+    if not identity.startswith("sha256:") or len(identity) != 71:
+        msg = "Temporal resolution artefact reference has an invalid identity."
+        raise TemporalResolutionValidationError(msg)
+    return ArtefactReference(kind, identity.removeprefix("sha256:"), schema_version)

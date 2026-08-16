@@ -99,10 +99,14 @@ class StructuredModel(Protocol):
         configuration: ModelConfiguration,
         structured_input: JsonValue,
     ) -> JsonValue:
-        """Return the configured model output for ``structured_input``."""
+        """Return output or raise ``ReasoningProviderError`` for provider failure."""
 
 
-class OpenRouterInvocationError(ValueError):
+class ReasoningProviderError(ValueError):
+    """Raised when a configured structured-model provider cannot respond."""
+
+
+class OpenRouterInvocationError(ReasoningProviderError):
     """Raised when OpenRouter cannot produce a structured model response."""
 
 
@@ -209,6 +213,15 @@ class ReasoningValidationError(ValueError):
         self.reference = reference
 
 
+class ReasoningInvocationError(ValueError):
+    """Raised when every bounded provider invocation fails."""
+
+    def __init__(self, reference: ArtefactReference) -> None:
+        """Describe the durable record of the failed provider attempts."""
+        super().__init__(f"Reasoning provider failed: {reference.identity}.")
+        self.reference = reference
+
+
 class ReasoningRunner:
     """Run structured reasoning and retain every invocation as an artefact."""
 
@@ -239,11 +252,19 @@ class ReasoningRunner:
         """Run one stage, validate its output, and retain the complete invocation."""
         self._configuration.validate()
         retry_history: list[JsonValue] = []
+        provider_failures = 0
         for attempt in range(1, self._maximum_attempts + 1):
-            output = self._model.invoke(
-                configuration=self._configuration,
-                structured_input=structured_input,
-            )
+            try:
+                output = self._model.invoke(
+                    configuration=self._configuration,
+                    structured_input=structured_input,
+                )
+            except ReasoningProviderError as error:
+                provider_failures += 1
+                retry_history.append(
+                    {"attempt": attempt, "provider_error": type(error).__name__}
+                )
+                continue
             try:
                 validated_output = validate_output(output)
             except ValueError as error:
@@ -270,6 +291,8 @@ class ReasoningRunner:
             structured_output=None,
             retry_history=retry_history,
         )
+        if provider_failures == self._maximum_attempts:
+            raise ReasoningInvocationError(reference)
         raise ReasoningValidationError(reference)
 
     def _write_invocation(
