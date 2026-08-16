@@ -6,7 +6,7 @@ import fcntl
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import cast
@@ -22,6 +22,11 @@ from aigg.reasoning import (
     ModelConfiguration,
     ReasoningRunner,
     StructuredModel,
+)
+from aigg.temporal_resolution import (
+    ClaimTimes,
+    ExtractedTemporalExpression,
+    claim_times_from_json,
 )
 
 OPEN_EXTRACTION_STAGE = "open-claim-extraction"
@@ -57,6 +62,7 @@ class CandidateClaim:
     confidence: float
     evidence: tuple[EvidenceAnchor, ...]
     rationale: str
+    times: ClaimTimes = field(default_factory=ClaimTimes)
 
     def as_json(self) -> dict[str, JsonValue]:
         """Return the durable candidate Claim representation."""
@@ -65,6 +71,7 @@ class CandidateClaim:
             "confidence": self.confidence,
             "evidence": [anchor.as_json() for anchor in self.evidence],
             "rationale": self.rationale,
+            "times": self.times.as_json(),
         }
 
 
@@ -77,21 +84,6 @@ class ExtractedMention:
 
     def as_json(self) -> dict[str, JsonValue]:
         """Return the durable mention representation."""
-        return {
-            "evidence": [anchor.as_json() for anchor in self.evidence],
-            "text": self.text,
-        }
-
-
-@dataclass(frozen=True)
-class ExtractedTemporalExpression:
-    """A temporal expression retained before temporal normalisation."""
-
-    evidence: tuple[EvidenceAnchor, ...]
-    text: str
-
-    def as_json(self) -> dict[str, JsonValue]:
-        """Return the durable temporal-expression representation."""
         return {
             "evidence": [anchor.as_json() for anchor in self.evidence],
             "text": self.text,
@@ -308,12 +300,10 @@ def _parse_candidate_claims(
         raise OpenExtractionValidationError(msg)
     claims: list[CandidateClaim] = []
     for claim in value:
-        if not isinstance(claim, dict) or set(claim) != {
-            "assertion",
-            "confidence",
-            "evidence",
-            "rationale",
-        }:
+        if not isinstance(claim, dict) or set(claim) not in (
+            {"assertion", "confidence", "evidence", "rationale"},
+            {"assertion", "confidence", "evidence", "rationale", "times"},
+        ):
             msg = (
                 "Each candidate Claim has assertion, confidence, evidence and "
                 "rationale."
@@ -336,6 +326,14 @@ def _parse_candidate_claims(
                 evidence=_parse_evidence(claim["evidence"], source),
                 rationale=_non_empty_string(
                     claim["rationale"], "Candidate Claim rationale"
+                ),
+                times=(
+                    ClaimTimes()
+                    if "times" not in claim
+                    else claim_times_from_json(
+                        claim["times"],
+                        lambda value: _parse_temporal_expression(value, source),
+                    )
                 ),
             )
         )
@@ -372,19 +370,21 @@ def _parse_temporal_expressions(
         raise OpenExtractionValidationError(msg)
     expressions: list[ExtractedTemporalExpression] = []
     for expression in value:
-        if not isinstance(expression, dict) or set(expression) != {
-            "evidence",
-            "text",
-        }:
-            msg = "Each temporal expression has text and evidence."
-            raise OpenExtractionValidationError(msg)
-        expressions.append(
-            ExtractedTemporalExpression(
-                evidence=_parse_evidence(expression["evidence"], source),
-                text=_non_empty_string(expression["text"], "Temporal expression text"),
-            )
-        )
+        expressions.append(_parse_temporal_expression(expression, source))
     return tuple(expressions)
+
+
+def _parse_temporal_expression(
+    value: JsonValue, source: SourceVersion
+) -> ExtractedTemporalExpression:
+    """Parse one source-supported temporal expression."""
+    if not isinstance(value, dict) or set(value) != {"evidence", "text"}:
+        msg = "Each temporal expression has text and evidence."
+        raise OpenExtractionValidationError(msg)
+    return ExtractedTemporalExpression(
+        evidence=_parse_evidence(value["evidence"], source),
+        text=_non_empty_string(value["text"], "Temporal expression text"),
+    )
 
 
 def _parse_evidence(
