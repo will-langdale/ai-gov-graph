@@ -24,7 +24,7 @@ The first experiment will process about 100 heterogeneous pages from one GOV.UK 
 ## MVP todo
 
 - [ ] Build the GOV.UK Content API downloader
-- [ ] Create deterministic source text and evidence references
+- [x] Create deterministic source text and evidence references
 - [ ] Define the claim representation
 - [ ] Build open claim extraction
 - [ ] Build entity and temporal resolution
@@ -71,9 +71,10 @@ uv run python -m ai_gov_graph.acquire documents fetch \
 ```
 
 The command enumerates the organisation through the GOV.UK Search API, stores
-each Content API response byte-for-byte under its SHA-256 hash, and writes
-`manifest.json` only after every source document has been acquired. The
-manifest records an explicit base-path order and the content ID, locale,
-update time and hash that identify each source version. A non-empty corpus
-directory is refused. Failed acquisitions produce `acquisition-failure.json`
-and no manifest, so partial evidence cannot be mistaken for a complete corpus.
+each Content API response byte-for-byte under its SHA-256 hash, and writes a
+versioned canonical text rendering alongside it. `manifest.json` records an
+explicit base-path order and the content ID, locale, update time, source and
+canonical hashes, and canonicaliser version that identify each source version.
+A non-empty corpus directory is refused. Failed acquisitions produce
+`acquisition-failure.json` and no manifest, so partial evidence cannot be
+mistaken for a complete corpus.

@@ -113,22 +113,74 @@ def test_source_document_acquisition_source_version(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     source_hash = sha256(source).hexdigest()
     manifest = json.loads((corpus_directory / "manifest.json").read_text())
-    assert manifest["source_documents"] == [
-        {
-            "base_path": "/alpha",
-            "content_api_url": "https://www.gov.uk/api/content/alpha",
-            "content_id": "alpha-id",
-            "locale": "en",
-            "sequence": 0,
-            "source_json": f"source-documents/{source_hash}.json",
-            "source_json_sha256": source_hash,
-            "source_version": f"content_id:alpha-id:sha256:{source_hash}",
-            "updated_at": "2026-08-16T10:00:00.000+00:00",
-        }
-    ]
+    document = manifest["source_documents"][0]
+    assert document["source_json"] == f"source-documents/{source_hash}.json"
+    assert document["source_json_sha256"] == source_hash
+    assert document["source_version"] == f"content_id:alpha-id:sha256:{source_hash}"
     assert (
         corpus_directory / f"source-documents/{source_hash}.json"
     ).read_bytes() == source
+
+
+def test_source_document_acquisition_canonical_text(tmp_path: Path) -> None:
+    """A source document retains its canonical text and immutable identity.
+
+    Guards later Evidence validation from relying on a text rendering that was
+    absent from, or different to, the acquired corpus.
+    """
+    source = (
+        b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
+        b'"updated_at":"2026-08-16T10:00:00.000+00:00"}'
+    )
+    search = json.dumps(
+        {"results": [{"link": "/alpha"}], "start": 0, "total": 1}
+    ).encode()
+    responses = iter([RecordedResponse(search), RecordedResponse(source)])
+    corpus_directory = tmp_path / "corpus"
+
+    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+                "--maximum",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    canonical_hash = "3d7b21d55cb48e4ae9d7ca9278ddd6771b8c9d0379f58764f5543805ad724ca1"
+    manifest = json.loads((corpus_directory / "manifest.json").read_text())
+    document = manifest["source_documents"][0]
+    assert {
+        "canonical_text": document["canonical_text"],
+        "canonical_text_sha256": document["canonical_text_sha256"],
+        "canonicaliser_version": document["canonicaliser_version"],
+    } == {
+        "canonical_text": f"canonical-documents/{canonical_hash}.txt",
+        "canonical_text_sha256": canonical_hash,
+        "canonicaliser_version": "1",
+    }
+    assert (corpus_directory / f"canonical-documents/{canonical_hash}.txt").read_text(
+        encoding="utf-8"
+    ) == (
+        "/base_path:\n"
+        "/alpha\n"
+        "\n"
+        "/content_id:\n"
+        "alpha-id\n"
+        "\n"
+        "/locale:\n"
+        "en\n"
+        "\n"
+        "/updated_at:\n"
+        "2026-08-16T10:00:00.000+00:00\n"
+    )
 
 
 def test_source_document_acquisition_incomplete_download(tmp_path: Path) -> None:

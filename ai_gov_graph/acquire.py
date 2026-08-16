@@ -13,6 +13,8 @@ from urllib.request import urlopen
 
 import typer
 
+from ai_gov_graph.canonical import CANONICALISER_VERSION, canonicalise_source_document
+
 ACQUISITION_SCHEMA_VERSION = "1"
 CONTENT_API_ROOT = "https://www.gov.uk/api/content"
 SEARCH_API_URL = "https://www.gov.uk/api/search.json"
@@ -48,6 +50,9 @@ class SourceDocument:
     """One immutable source document version in a corpus manifest."""
 
     base_path: str
+    canonical_text: str
+    canonical_text_sha256: str
+    canonicaliser_version: str
     content_api_url: str
     content_id: str
     locale: str
@@ -60,6 +65,9 @@ class SourceDocument:
         """Return the durable source-document representation."""
         return {
             "base_path": self.base_path,
+            "canonical_text": self.canonical_text,
+            "canonical_text_sha256": self.canonical_text_sha256,
+            "canonicaliser_version": self.canonicaliser_version,
             "content_api_url": self.content_api_url,
             "content_id": self.content_id,
             "locale": self.locale,
@@ -228,8 +236,16 @@ def _acquire_source_document(
     source_json_sha256 = sha256(raw_json).hexdigest()
     relative_source_json = Path("source-documents") / f"{source_json_sha256}.json"
     _write_bytes_immutable(corpus_directory / relative_source_json, raw_json)
+    canonical = canonicalise_source_document(raw_json)
+    relative_canonical_text = Path("canonical-documents") / f"{canonical.sha256}.txt"
+    _write_bytes_immutable(
+        corpus_directory / relative_canonical_text, canonical.text.encode("utf-8")
+    )
     return SourceDocument(
         base_path=source_path,
+        canonical_text=relative_canonical_text.as_posix(),
+        canonical_text_sha256=canonical.sha256,
+        canonicaliser_version=CANONICALISER_VERSION,
         content_api_url=content_api_url,
         content_id=content_id,
         locale=locale,
