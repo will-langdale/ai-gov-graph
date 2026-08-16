@@ -1,4 +1,4 @@
-# ai-gov-graph
+# 🏛️ ai-gov-graph
 
 `ai-gov-graph` is an experiment in using LLMs to build and evolve a knowledge graph from GOV.UK content.
 
@@ -21,7 +21,50 @@ Initial questions include
 
 The first experiment will process about 100 heterogeneous pages from one GOV.UK department.
 
-## MVP todo
+## 🚀 Getting started
+
+You need Python 3.14 or later and [uv](https://docs.astral.sh/uv/) installed.
+
+Clone the repository, then install the project and its development tools:
+
+```shell
+uv sync
+```
+
+Confirm the available commands:
+
+```shell
+uv run aigg acquire --help
+uv run aigg graph --help
+```
+
+To create a small local evidence corpus, fetch up to ten documents from a
+GOV.UK organisation into a new directory:
+
+```shell
+uv run aigg acquire documents fetch \
+  --corpus-directory evidence/department-for-business-and-trade \
+  --organisation department-for-business-and-trade \
+  --maximum 10
+```
+
+The corpus directory must not already contain files. The command needs network
+access to the GOV.UK APIs but does not require an LLM credential.
+
+## 🧭 CLI at a glance
+
+The project keeps its workflows in separate command line applications so that
+source evidence and graph construction have clear boundaries:
+
+- `acquire`: discover GOV.UK documents and record an immutable, manifest-backed
+  evidence corpus.
+- `graph`: initialise and evolve a graph experiment lineage from local,
+  verified evidence.
+- Planned workflows will extend these applications rather than blur the evidence
+  and graph boundaries. See the [design document](docs/plans/ai-gov-graph.md)
+  for the experiment programme.
+
+## 📝 MVP todo
 
 - [ ] Build the GOV.UK Content API downloader
 - [x] Create deterministic source text and evidence references
@@ -38,20 +81,21 @@ The first experiment will process about 100 heterogeneous pages from one GOV.UK 
 
 The detailed architecture, experimental questions and spike programme live in the [design document](docs/plans/ai-gov-graph.md).
 
-## Commands
+## 💻 Commands
 
-The project has separate command line interfaces for acquiring source documents
-and constructing a graph from local evidence:
+Use `aigg` for the project command line interface. It keeps separate
+subcommands for acquiring source documents and constructing a graph from local
+evidence:
 
 ```shell
-uv run python -m ai_gov_graph.acquire --help
-uv run python -m ai_gov_graph.graph --help
+uv run aigg acquire --help
+uv run aigg graph --help
 ```
 
 Initialise a graph experiment lineage from a JSON configuration object:
 
 ```shell
-uv run python -m ai_gov_graph.graph experiment initialise \
+uv run aigg graph experiment initialise \
   --lineage-directory lineages/first-run \
   --configuration configuration.json
 ```
@@ -64,7 +108,7 @@ hash is checked before an artefact is used.
 Acquire an immutable, manifest-backed evidence corpus for a GOV.UK organisation:
 
 ```shell
-uv run python -m ai_gov_graph.acquire documents fetch \
+uv run aigg acquire documents fetch \
   --corpus-directory evidence/department-for-business-and-trade \
   --organisation department-for-business-and-trade \
   --maximum 100

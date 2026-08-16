@@ -10,6 +10,9 @@ dependencies = [
     "typer>=0.27.1",
 ]
 
+[project.scripts]
+aigg = "ai_gov_graph.cli:app"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
