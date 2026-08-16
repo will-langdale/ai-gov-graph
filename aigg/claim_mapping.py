@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 from urllib.parse import quote
@@ -37,6 +37,7 @@ DISPOSITION = NamedNode(f"{AIGG}disposition")
 EVIDENCE = NamedNode(f"{AIGG}evidence")
 MAPPING_REASON = NamedNode(f"{AIGG}mappingReason")
 VALIDATION_REASON = NamedNode(f"{AIGG}validationReason")
+CONFLICT_REASON = NamedNode(f"{AIGG}conflictReason")
 SCOPE_REASON = NamedNode(f"{AIGG}scopeReason")
 ACCEPTANCE_REASON = NamedNode(f"{AIGG}acceptanceReason")
 PROJECTS_ASSERTION = NamedNode(f"{AIGG}projectsAssertion")
@@ -120,6 +121,11 @@ class ClaimMapping:
     scope: StageReason
     acceptance: StageReason
     semantic_assertions: tuple[SemanticAssertion, ...] = ()
+    conflict: StageReason = field(
+        default_factory=lambda: StageReason(
+            "No conflict assessment was recorded for this Claim mapping."
+        )
+    )
 
     def __post_init__(self) -> None:
         """Keep acceptance and the canonical semantic projection consistent."""
@@ -146,6 +152,7 @@ class ClaimMapping:
             "acceptance": self.acceptance.reason,
             "candidate": self.candidate.as_json(),
             "claim_id": self.claim_id,
+            "conflict": self.conflict.reason,
             "disposition": self.disposition.value,
             "mapping": self.mapping.reason,
             "scope": self.scope.reason,
@@ -183,16 +190,29 @@ class ClaimMappingService:
 
 def claim_mapping_from_json(value: JsonValue) -> ClaimMapping:
     """Parse a durable Claim mapping before it enters a projection."""
-    if not isinstance(value, dict) or set(value) != {
-        "acceptance",
-        "candidate",
-        "claim_id",
-        "disposition",
-        "mapping",
-        "scope",
-        "semantic_assertions",
-        "validation",
-    }:
+    if not isinstance(value, dict) or set(value) not in (
+        {
+            "acceptance",
+            "candidate",
+            "claim_id",
+            "conflict",
+            "disposition",
+            "mapping",
+            "scope",
+            "semantic_assertions",
+            "validation",
+        },
+        {
+            "acceptance",
+            "candidate",
+            "claim_id",
+            "disposition",
+            "mapping",
+            "scope",
+            "semantic_assertions",
+            "validation",
+        },
+    ):
         msg = "Claim mapping has an invalid shape."
         raise ClaimMappingValidationError(msg)
     try:
@@ -202,7 +222,7 @@ def claim_mapping_from_json(value: JsonValue) -> ClaimMapping:
         raise ClaimMappingValidationError(msg) from error
     return ClaimMapping(
         claim_id=_text(value["claim_id"], "Claim ID"),
-        candidate=_candidate_from_json(value["candidate"]),
+        candidate=candidate_claim_from_json(value["candidate"]),
         disposition=disposition,
         mapping=StageReason(_text(value["mapping"], "Claim mapping reason")),
         validation=StageReason(_text(value["validation"], "Claim validation reason")),
@@ -210,6 +230,15 @@ def claim_mapping_from_json(value: JsonValue) -> ClaimMapping:
         acceptance=StageReason(_text(value["acceptance"], "Claim acceptance reason")),
         semantic_assertions=_semantic_assertions_from_json(
             value["semantic_assertions"]
+        ),
+        conflict=StageReason(
+            _text(
+                value.get(
+                    "conflict",
+                    "No conflict assessment was recorded for this Claim mapping.",
+                ),
+                "Claim conflict reason",
+            )
         ),
     )
 
@@ -256,6 +285,12 @@ def project_claim_mappings(mappings: tuple[ClaimMapping, ...]) -> list[Quad]:
                     claim,
                     VALIDATION_REASON,
                     RdfLiteral(mapping.validation.reason),
+                    CLAIMS_GRAPH,
+                ),
+                Quad(
+                    claim,
+                    CONFLICT_REASON,
+                    RdfLiteral(mapping.conflict.reason),
                     CLAIMS_GRAPH,
                 ),
                 Quad(
@@ -311,7 +346,7 @@ def _accepted_assertion_quads(
     return quads
 
 
-def _candidate_from_json(value: JsonValue) -> CandidateClaim:
+def candidate_claim_from_json(value: JsonValue) -> CandidateClaim:
     """Recreate a source-supported candidate Claim from its durable record."""
     if not isinstance(value, dict) or set(value) != {
         "assertion",
