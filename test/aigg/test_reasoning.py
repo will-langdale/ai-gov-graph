@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ai_gov_graph.artefacts import ArtefactStore, JsonValue
-from ai_gov_graph.reasoning import (
+from aigg.artefacts import ArtefactStore, JsonValue
+from aigg.reasoning import (
     ModelConfiguration,
     OpenRouterInvocationError,
     OpenRouterStructuredModel,

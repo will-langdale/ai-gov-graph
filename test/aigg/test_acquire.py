@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 
-from ai_gov_graph.acquire import app
+from aigg.acquire import app
 from typer.testing import CliRunner
 
 
@@ -57,7 +57,7 @@ def test_source_document_acquisition_manifest_order(tmp_path: Path) -> None:
     )
     corpus_directory = tmp_path / "corpus"
 
-    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+    with patch("aigg.acquire.urlopen", side_effect=responses):
         result = CliRunner().invoke(
             app,
             [
@@ -95,7 +95,7 @@ def test_source_document_acquisition_source_version(tmp_path: Path) -> None:
     responses = iter([RecordedResponse(search), RecordedResponse(source)])
     corpus_directory = tmp_path / "corpus"
 
-    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+    with patch("aigg.acquire.urlopen", side_effect=responses):
         result = CliRunner().invoke(
             app,
             [
@@ -139,7 +139,7 @@ def test_source_document_acquisition_canonical_manifest(tmp_path: Path) -> None:
     responses = iter([RecordedResponse(search), RecordedResponse(source)])
     corpus_directory = tmp_path / "corpus"
 
-    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+    with patch("aigg.acquire.urlopen", side_effect=responses):
         result = CliRunner().invoke(
             app,
             [
@@ -186,7 +186,7 @@ def test_source_document_acquisition_canonical_text(tmp_path: Path) -> None:
     responses = iter([RecordedResponse(search), RecordedResponse(source)])
     corpus_directory = tmp_path / "corpus"
 
-    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+    with patch("aigg.acquire.urlopen", side_effect=responses):
         result = CliRunner().invoke(
             app,
             [
@@ -248,7 +248,7 @@ def test_source_document_acquisition_incomplete_download(tmp_path: Path) -> None
     )
     corpus_directory = tmp_path / "corpus"
 
-    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+    with patch("aigg.acquire.urlopen", side_effect=responses):
         result = CliRunner().invoke(
             app,
             [
@@ -290,7 +290,7 @@ def test_source_document_acquisition_existing_manifest(tmp_path: Path) -> None:
     manifest_path = corpus_directory / "manifest.json"
     manifest_path.write_text('{"status":"complete"}\n', encoding="utf-8")
 
-    with patch("ai_gov_graph.acquire.urlopen") as request:
+    with patch("aigg.acquire.urlopen") as request:
         result = CliRunner().invoke(
             app,
             [

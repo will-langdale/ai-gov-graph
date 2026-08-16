@@ -9,7 +9,7 @@ from typing import Any, Protocol, TypeAlias, cast
 
 from langchain_openrouter import ChatOpenRouter
 
-from ai_gov_graph.artefacts import ArtefactReference, ArtefactStore, JsonValue
+from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from ai_gov_graph.graph import app
+from aigg.graph import app
 from typer.testing import CliRunner
 
 

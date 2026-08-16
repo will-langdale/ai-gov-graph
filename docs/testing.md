@@ -41,7 +41,7 @@ For a parametrised family, the case is the `pytest.param(..., id=...)`. The func
 
 ## Where a test lives
 
-The test tree shadows `src`. Put unit tests at `test/<module>/test_<thing>.py` for `src/ai_gov_graph/<module>/<thing>.py`. Put cross module and end to end behaviour in its own test area.
+The test tree shadows `src`. Put unit tests at `test/<module>/test_<thing>.py` for `src/aigg/<module>/<thing>.py`. Put cross module and end to end behaviour in its own test area.
 
 Use a small scenario fixture for plans and end to end tests that assert on known rows. Use a generated oracle for methodology correctness at scale.
 

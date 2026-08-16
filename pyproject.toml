@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aigg = "ai_gov_graph.cli:app"
+aigg = "aigg.cli:app"
 
 [dependency-groups]
 dev = [

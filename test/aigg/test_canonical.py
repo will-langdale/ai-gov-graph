@@ -6,7 +6,7 @@ from dataclasses import replace
 from hashlib import sha256
 
 import pytest
-from ai_gov_graph.canonical import (
+from aigg.canonical import (
     CANONICALISER_VERSION,
     EvidenceAnchor,
     EvidenceValidationError,

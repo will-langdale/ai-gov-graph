@@ -8,15 +8,15 @@ from threading import Barrier, Thread
 from time import sleep
 from typing import cast
 
-from ai_gov_graph.artefacts import ArtefactStore, JsonValue
-from ai_gov_graph.canonical import EvidenceAnchor, canonicalise_source_document
-from ai_gov_graph.open_extraction import (
+from aigg.artefacts import ArtefactStore, JsonValue
+from aigg.canonical import EvidenceAnchor, canonicalise_source_document
+from aigg.open_extraction import (
     CandidateClaim,
     OpenExtraction,
     OpenExtractionService,
     SourceVersion,
 )
-from ai_gov_graph.reasoning import ModelConfiguration, StructuredModel
+from aigg.reasoning import ModelConfiguration, StructuredModel
 
 
 @dataclass

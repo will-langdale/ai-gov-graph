@@ -3,7 +3,7 @@
 import pytest
 from typer.testing import CliRunner
 
-from ai_gov_graph.cli import app
+from aigg.cli import app
 
 
 @pytest.mark.parametrize(

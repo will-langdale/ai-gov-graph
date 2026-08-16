@@ -11,14 +11,14 @@ from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
-from ai_gov_graph.artefacts import ArtefactReference, ArtefactStore, JsonValue
-from ai_gov_graph.canonical import (
+from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
+from aigg.canonical import (
     EvidenceAnchor,
     EvidenceValidationError,
     canonicalise_source_document,
     validate_evidence_anchor,
 )
-from ai_gov_graph.reasoning import (
+from aigg.reasoning import (
     ModelConfiguration,
     ReasoningRunner,
     StructuredModel,

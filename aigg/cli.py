@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import typer
 
-from ai_gov_graph.acquire import app as acquire_app
-from ai_gov_graph.graph import app as graph_app
+from aigg.acquire import app as acquire_app
+from aigg.graph import app as graph_app
 
 app = typer.Typer(
     help="Acquire GOV.UK evidence and construct graph experiment lineages.",

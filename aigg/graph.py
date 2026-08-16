@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from ai_gov_graph.artefacts import (
+from aigg.artefacts import (
     ARTEFACT_SCHEMA_VERSION,
     ArtefactReference,
     ArtefactStore,

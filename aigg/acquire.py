@@ -13,7 +13,7 @@ from urllib.request import urlopen
 
 import typer
 
-from ai_gov_graph.canonical import CANONICALISER_VERSION, canonicalise_source_document
+from aigg.canonical import CANONICALISER_VERSION, canonicalise_source_document
 
 ACQUISITION_SCHEMA_VERSION = "1"
 CONTENT_API_ROOT = "https://www.gov.uk/api/content"

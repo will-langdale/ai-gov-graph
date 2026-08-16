@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from ai_gov_graph.artefacts import ArtefactIntegrityError, ArtefactStore
+from aigg.artefacts import ArtefactIntegrityError, ArtefactStore
 
 
 def test_experiment_lineage_integrity_changed_content(tmp_path: Path) -> None:
