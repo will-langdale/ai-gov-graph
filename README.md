@@ -36,4 +36,4 @@ The first experiment will process about 100 heterogeneous pages from one GOV.UK 
 - [ ] Run the first 100 page corpus
 - [ ] Verify the graph can be rebuilt entirely from version controlled artefacts
 
-The detailed architecture, experimental questions and spike programme live in the [design document](plans/ai-gov-graph.md).
+The detailed architecture, experimental questions and spike programme live in the [design document](docs/plans/ai-gov-graph.md).
