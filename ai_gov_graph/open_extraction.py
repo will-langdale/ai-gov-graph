@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -129,31 +132,46 @@ class OpenExtractionService:
     def extract(self, source: SourceVersion) -> OpenExtraction:
         """Return the one durable result for ``source``, without ontology input."""
         _validate_source_version(source)
-        existing = self._load_existing(source)
-        if existing is not None:
-            return existing
+        with self._source_lock(source):
+            existing = self._load_existing(source)
+            if existing is not None:
+                return existing
 
-        invocation = self._runner.run(
-            stage=OPEN_EXTRACTION_STAGE,
-            structured_input={
-                "canonical_text": source.canonical_text,
-                "source_version": source.identity,
-            },
-            validate_output=lambda value: _normalise_output(value, source),
-        )
-        output = cast(dict[str, JsonValue], invocation.output)
-        reference = self._store.write_json(
-            "open-extraction",
-            {
-                "candidate_claims": output["candidate_claims"],
-                "mentions": output["mentions"],
-                "reasoning_invocation": _reference_data(invocation.reference),
-                "source_version": source.identity,
-                "temporal_expressions": output["temporal_expressions"],
-            },
-        )
-        self._write_index(source, reference)
-        return _parse_extraction(self._store.read_json(reference), reference, source)
+            invocation = self._runner.run(
+                stage=OPEN_EXTRACTION_STAGE,
+                structured_input={
+                    "canonical_text": source.canonical_text,
+                    "source_version": source.identity,
+                },
+                validate_output=lambda value: _normalise_output(value, source),
+            )
+            output = cast(dict[str, JsonValue], invocation.output)
+            reference = self._store.write_json(
+                "open-extraction",
+                {
+                    "candidate_claims": output["candidate_claims"],
+                    "mentions": output["mentions"],
+                    "reasoning_invocation": _reference_data(invocation.reference),
+                    "source_version": source.identity,
+                    "temporal_expressions": output["temporal_expressions"],
+                },
+            )
+            self._write_index(source, reference)
+            return _parse_extraction(
+                self._store.read_json(reference), reference, source
+            )
+
+    @contextmanager
+    def _source_lock(self, source: SourceVersion) -> Iterator[None]:
+        """Serialise all extraction work for one Source document version."""
+        lock_path = self._lock_path(source)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _load_existing(self, source: SourceVersion) -> OpenExtraction | None:
         """Load a verified prior extraction record, if this version has one."""
@@ -194,15 +212,18 @@ class OpenExtractionService:
             with path.open("x", encoding="utf-8") as index:
                 index.write(content)
         except FileExistsError as error:
-            existing = self._load_existing(source)
-            if existing is None:
-                msg = f"Open-extraction index disappeared: {path}."
-                raise OpenExtractionValidationError(msg) from error
+            msg = f"Open-extraction index appeared while locked: {path}."
+            raise OpenExtractionValidationError(msg) from error
 
     def _index_path(self, source: SourceVersion) -> Path:
         """Return the stable lookup path for one Source version identity."""
         identity_hash = sha256(source.identity.encode("utf-8")).hexdigest()
         return self._store.root / "open-extraction-index" / f"{identity_hash}.json"
+
+    def _lock_path(self, source: SourceVersion) -> Path:
+        """Return the inter-process lock path for one Source version identity."""
+        identity_hash = sha256(source.identity.encode("utf-8")).hexdigest()
+        return self._store.root / "open-extraction-lock" / f"{identity_hash}.lock"
 
 
 def _validate_source_version(source: SourceVersion) -> None:

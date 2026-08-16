@@ -4,11 +4,15 @@ import json
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from threading import Barrier, Thread
+from time import sleep
 from typing import cast
 
 from ai_gov_graph.artefacts import ArtefactStore, JsonValue
 from ai_gov_graph.canonical import EvidenceAnchor, canonicalise_source_document
 from ai_gov_graph.open_extraction import (
+    CandidateClaim,
+    OpenExtraction,
     OpenExtractionService,
     SourceVersion,
 )
@@ -17,7 +21,7 @@ from ai_gov_graph.reasoning import ModelConfiguration, StructuredModel
 
 @dataclass
 class StaticModel(StructuredModel):
-    """Return a configured result and retain every invocation."""
+    """Control the external, non-deterministic model boundary in tests."""
 
     output: JsonValue
     calls: list[JsonValue]
@@ -33,11 +37,33 @@ class StaticModel(StructuredModel):
         return self.output
 
 
+@dataclass
+class DelayedModel(StructuredModel):
+    """Keep one model call active while concurrent extraction begins."""
+
+    output: JsonValue
+    calls: list[JsonValue]
+
+    def invoke(
+        self,
+        *,
+        configuration: ModelConfiguration,
+        structured_input: JsonValue,
+    ) -> JsonValue:
+        """Delay the configured output at the external model boundary."""
+        self.calls.append(structured_input)
+        sleep(0.1)
+        return self.output
+
+
 def test_claim_extraction_source_document_one_pass(tmp_path: Path) -> None:
     """A Source document version reuses its original extraction result.
 
     Guards later reconsideration from silently creating a new candidate Claim
     from the same source prose.
+
+    Uses a static model because model invocation is an external,
+    non-deterministic boundary.
     """
     source_json = _source_json()
     source = _source_version(source_json)
@@ -87,11 +113,44 @@ def test_claim_extraction_source_document_one_pass(tmp_path: Path) -> None:
     assert extraction == reconsidered
 
 
+def test_claim_extraction_source_document_concurrent_one_pass(tmp_path: Path) -> None:
+    """Concurrent requests invoke the model once for one Source document version.
+
+    Guards simultaneous graph workers from creating competing candidate Claims
+    from the same source prose. Uses a delayed model because model invocation is
+    an external, non-deterministic boundary.
+    """
+    source_json = _source_json()
+    source = _source_version(source_json)
+    model = DelayedModel(_candidate_output(source_json), [])
+    service = _service(tmp_path, model)
+    start = Barrier(3)
+    extractions: list[OpenExtraction] = []
+
+    def extract() -> None:
+        """Begin extraction with the other graph worker."""
+        start.wait()
+        extractions.append(service.extract(source))
+
+    workers = [Thread(target=extract), Thread(target=extract)]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join()
+
+    assert len(model.calls) == 1
+    assert extractions[0] == extractions[1]
+
+
 def test_claim_extraction_candidate_claim(tmp_path: Path) -> None:
     """Open extraction returns a typed candidate Claim with its Evidence.
 
     Guards the candidate Claim contract from losing its assertion, confidence,
     rationale or source support before later graph decisions.
+
+    Uses a static model because model invocation is an external,
+    non-deterministic boundary.
     """
     source_json = _source_json()
     model = StaticModel(
@@ -112,11 +171,13 @@ def test_claim_extraction_candidate_claim(tmp_path: Path) -> None:
 
     extraction = _service(tmp_path, model).extract(_source_version(source_json))
 
-    assert extraction.candidate_claims[0].assertion == "The department has a minister."
-    assert extraction.candidate_claims[0].confidence == 0.9
-    assert extraction.candidate_claims[0].evidence == (_evidence(source_json),)
-    assert (
-        extraction.candidate_claims[0].rationale == "The source states this directly."
+    assert extraction.candidate_claims == (
+        CandidateClaim(
+            assertion="The department has a minister.",
+            confidence=0.9,
+            evidence=(_evidence(source_json),),
+            rationale="The source states this directly.",
+        ),
     )
 
 
@@ -125,6 +186,9 @@ def test_claim_extraction_mention(tmp_path: Path) -> None:
 
     Guards a later Resolver from having to recover an extracted mention from a
     candidate Claim assertion.
+
+    Uses a static model because model invocation is an external,
+    non-deterministic boundary.
     """
     source_json = _source_json()
     model = StaticModel(
@@ -149,6 +213,9 @@ def test_claim_extraction_temporal_expression(tmp_path: Path) -> None:
 
     Guards later temporal resolution from needing to infer an expression that
     open extraction did not preserve.
+
+    Uses a static model because model invocation is an external,
+    non-deterministic boundary.
     """
     source_json = _source_json()
     model = StaticModel(
@@ -178,6 +245,9 @@ def test_claim_extraction_source_document_no_candidates(tmp_path: Path) -> None:
 
     Guards later processing from treating no candidate Claims as an unprocessed
     version that it may extract again.
+
+    Uses a static model because model invocation is an external,
+    non-deterministic boundary.
     """
     source_json = _source_json()
     source = _source_version(source_json)
@@ -212,6 +282,22 @@ def _service(tmp_path: Path, model: StructuredModel) -> OpenExtractionService:
         ModelConfiguration("example", "example-1", {"temperature": 0}),
         maximum_attempts=1,
     )
+
+
+def _candidate_output(source_json: bytes) -> JsonValue:
+    """Return the smallest valid candidate Claim output for a model test double."""
+    return {
+        "candidate_claims": [
+            {
+                "assertion": "The department has a minister.",
+                "confidence": 0.9,
+                "evidence": [_evidence(source_json).as_json()],
+                "rationale": "The source states this directly.",
+            }
+        ],
+        "mentions": [],
+        "temporal_expressions": [],
+    }
 
 
 def _source_json() -> bytes:
