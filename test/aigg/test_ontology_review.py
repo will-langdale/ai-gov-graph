@@ -155,6 +155,9 @@ def test_ontology_review_accepted(tmp_path: Path) -> None:
     assert recorded.outcome.accepted
     assert replayed.outcome == recorded.outcome
     assert len(model.calls) == 4
+    assert all(
+        isinstance(call, dict) and "instructions" in call for call in model.calls
+    )
     assert replay_model.calls == []
     assert retriever.queries == ["scheme status ontology"]
     research = store.read_json(recorded.research)

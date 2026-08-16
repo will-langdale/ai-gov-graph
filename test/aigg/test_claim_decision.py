@@ -155,11 +155,13 @@ def test_claim_decision_rejects_unbounded_model_evidence(tmp_path: Path) -> None
         "candidate",
         "claim_id",
         "entity_decisions",
+        "instructions",
         "maximum_accepted_context",
         "ontology_turtle",
         "shacl_turtle",
         "temporal_decisions",
     }
+    assert "semantic_assertions" in structured_input["instructions"]
 
 
 def test_claim_change_validation_shacl_diagnostics(tmp_path: Path) -> None:

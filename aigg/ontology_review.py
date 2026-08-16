@@ -35,6 +35,23 @@ from aigg.ontology_evolution import (
 )
 from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
 
+RESEARCHER_INSTRUCTIONS = (
+    "Return exactly a JSON object with non-empty query and rationale fields. "
+    "The query must concern external Ontology terms only."
+)
+PROPOSER_INSTRUCTIONS = (
+    "Return exactly a JSON object with conclusion, rationale and assessments. "
+    "assessments is a non-empty list of objects with artefact_index, term, "
+    "suitable and rationale. Assess only the supplied vendored artefacts."
+)
+CRITIC_INSTRUCTIONS = "Return exactly a JSON object with one non-empty rationale field."
+SYNTHESISER_INSTRUCTIONS = (
+    "Return exactly a JSON object with rationale, ontology_turtle, shacl_turtle, "
+    "changes, mapping and reconsideration_reason. changes is a non-empty list of "
+    "term, description, kind and external_terms objects. mapping has acceptance, "
+    "conflict, disposition, mapping, scope, semantic_assertions and validation."
+)
+
 
 class OntologyReviewValidationError(ValueError):
     """Raised when an Ontology-review record cannot preserve its provenance."""
@@ -121,6 +138,7 @@ class OntologyReviewService:
         research_output, researcher_invocation = self._run(
             "ontology-review-researcher",
             {
+                "instructions": RESEARCHER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
                 "shacl_turtle": shacl_turtle,
@@ -138,6 +156,7 @@ class OntologyReviewService:
             "ontology-review-proposer",
             {
                 "external_artefacts": _vendored_artefacts_json(self._store, artefacts),
+                "instructions": PROPOSER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
             },
@@ -161,6 +180,7 @@ class OntologyReviewService:
             "ontology-review-critic",
             {
                 "external_artefacts": _vendored_artefacts_json(self._store, artefacts),
+                "instructions": CRITIC_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
                 "proposer": self._store.read_json(proposer),
@@ -172,6 +192,7 @@ class OntologyReviewService:
             {
                 "critic": self._store.read_json(critic),
                 "external_artefacts": _vendored_artefacts_json(self._store, artefacts),
+                "instructions": SYNTHESISER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
                 "proposer": self._store.read_json(proposer),

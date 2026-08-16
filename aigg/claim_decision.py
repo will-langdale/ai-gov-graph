@@ -31,6 +31,16 @@ from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
 from aigg.temporal_resolution import ResolvedTemporalExpression, TemporalConstraint
 
 CLAIM_DECISION_STAGE = "claim-decision"
+CLAIM_DECISION_INSTRUCTIONS = """Map the supplied candidate Claim using only its context.
+Return one JSON object with exactly these fields: acceptance, conflict,
+disposition, mapping, scope, semantic_assertions and validation. Each reason
+field is non-empty text. disposition is one of accepted, ontology_gap,
+constraint_violation, conflict, unresolved_entity, unresolved_time,
+out_of_scope, low_confidence, rejected or superseded. semantic_assertions is a
+list of objects with subject, predicate, object and object_kind; object_kind is
+iri or literal. Include semantic_assertions only when disposition is accepted.
+Do not add Evidence, source material, fields or assertions outside the supplied
+context."""
 
 
 class ClaimDecisionValidationError(ValueError):
@@ -335,6 +345,7 @@ class ClaimDecisionService:
         entity, temporal = self._decision_records(context)
         structured_input["entity_decisions"] = entity
         structured_input["temporal_decisions"] = temporal
+        structured_input["instructions"] = CLAIM_DECISION_INSTRUCTIONS
         return structured_input
 
     def _decision_records(
