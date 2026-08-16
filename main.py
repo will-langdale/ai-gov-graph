@@ -1,4 +1,8 @@
-def main():
+"""Hello world."""
+
+
+def main() -> None:
+    """Hello world."""
     print("Hello from ai-gov-graph!")
 
 

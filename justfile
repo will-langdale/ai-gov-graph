@@ -8,6 +8,7 @@ default:
 format:
     uvx ruff@latest format .
     uvx ruff@latest check . --fix
+    bunx prettier --write "**/*.md"
 
 # Run type checking
 check *ARGS:
