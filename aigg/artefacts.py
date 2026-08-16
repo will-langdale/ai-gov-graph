@@ -32,6 +32,42 @@ class ArtefactReference:
         return f"sha256:{self.sha256}"
 
 
+def reference_as_json(
+    reference: ArtefactReference | None,
+) -> dict[str, str] | None:
+    """Return one optional artefact reference in its durable representation."""
+    if reference is None:
+        return None
+    return {
+        "identity": reference.identity,
+        "kind": reference.kind,
+        "schema_version": reference.schema_version,
+    }
+
+
+def reference_from_json(value: JsonValue) -> ArtefactReference | None:
+    """Parse one optional durable artefact reference before following it."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "identity",
+        "kind",
+        "schema_version",
+    }:
+        msg = "Artefact reference has an invalid shape."
+        raise ArtefactIntegrityError(msg)
+    identity = value["identity"]
+    kind = value["kind"]
+    schema_version = value["schema_version"]
+    if not all(isinstance(field, str) for field in (identity, kind, schema_version)):
+        msg = "Artefact reference fields must be strings."
+        raise ArtefactIntegrityError(msg)
+    if not identity.startswith("sha256:") or len(identity) != 71:
+        msg = "Artefact reference has an invalid identity."
+        raise ArtefactIntegrityError(msg)
+    return ArtefactReference(kind, identity.removeprefix("sha256:"), schema_version)
+
+
 class ArtefactStore:
     """Read and write immutable JSON artefacts, verifying every read."""
 

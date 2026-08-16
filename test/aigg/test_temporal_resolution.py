@@ -1,20 +1,42 @@
 """Tests for temporal resolution and Claim timing."""
 
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+from aigg.artefacts import ArtefactStore, JsonValue
 from aigg.canonical import EvidenceAnchor
 from aigg.open_extraction import CandidateClaim, ExtractedTemporalExpression
+from aigg.reasoning import ModelConfiguration, StructuredModel
 from aigg.temporal_resolution import (
     CalendarTemporalResolver,
     ClaimTimes,
     ResolvedTemporalExpression,
     TemporalConstraint,
     TemporalResolutionContext,
+    TemporalResolutionService,
     UnresolvedTemporalExpression,
     claim_times_from_json,
 )
+
+
+@dataclass
+class StaticModel(StructuredModel):
+    """Return one configured result from the external model boundary."""
+
+    output: JsonValue
+
+    def invoke(
+        self,
+        *,
+        configuration: ModelConfiguration,
+        structured_input: JsonValue,
+    ) -> JsonValue:
+        """Return the configured structured output."""
+        del configuration, structured_input
+        return self.output
 
 
 def _calendar_cases() -> list[object]:
@@ -108,6 +130,75 @@ def test_claim_temporal_resolution_relative_expression_reference_time() -> None:
         date(2026, 4, 1),
         date(2026, 5, 1),
     )
+
+
+def test_claim_temporal_resolution_following_month_reference_time() -> None:
+    """The following April resolves without model judgement when a reference exists.
+
+    Guards the hybrid resolver from sending an equivalent calendar expression to
+    an external model when deterministic calculation already has sufficient data.
+    """
+    outcome = CalendarTemporalResolver().resolve(
+        TemporalResolutionContext(
+            _expression("the following April"), datetime(2026, 3, 1, tzinfo=UTC)
+        )
+    )
+
+    assert isinstance(outcome, ResolvedTemporalExpression)
+    assert outcome.constraint == TemporalConstraint.during(
+        date(2026, 4, 1),
+        date(2026, 5, 1),
+    )
+
+
+def test_claim_temporal_resolution_rejects_unlinked_constraint_evidence(
+    tmp_path: Path,
+) -> None:
+    """A model cannot combine one record's Evidence with another record's time.
+
+    Guards temporal resolution from returning a comparable constraint that the
+    model has not tied to its retained supporting Evidence.
+    """
+    first = _evidence("The scheme starts in April.")
+    second = _evidence("The scheme ends in May.")
+    service = TemporalResolutionService(
+        ArtefactStore(tmp_path / "artefacts"),
+        StaticModel(
+            {
+                "constraint": TemporalConstraint.during(
+                    date(2026, 5, 1), date(2026, 6, 1)
+                ).as_json(),
+                "evidence": [first.as_json()],
+                "kind": "resolved",
+                "rationale": "The source establishes the later period.",
+            }
+        ),
+        ModelConfiguration("openrouter", "example/model", {"temperature": 0}),
+        maximum_attempts=1,
+    )
+    request = service.create_request(
+        TemporalResolutionContext(
+            _expression("after the announcement"),
+            source_context=(
+                {
+                    "constraint": TemporalConstraint.during(
+                        date(2026, 4, 1), date(2026, 5, 1)
+                    ).as_json(),
+                    "evidence": [first.as_json()],
+                },
+                {
+                    "constraint": TemporalConstraint.during(
+                        date(2026, 5, 1), date(2026, 6, 1)
+                    ).as_json(),
+                    "evidence": [second.as_json()],
+                },
+            ),
+            maximum_source_context=2,
+        )
+    )
+
+    with pytest.raises(ValueError, match="failed validation"):
+        service.resolve_request(request)
 
 
 def test_claim_temporal_resolution_distinguishes_time_kinds() -> None:

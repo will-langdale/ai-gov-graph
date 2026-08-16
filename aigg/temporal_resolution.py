@@ -9,7 +9,16 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Protocol, TypeAlias, cast
 
-from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
+from aigg.artefacts import (
+    ArtefactIntegrityError,
+    ArtefactReference,
+    ArtefactStore,
+    JsonValue,
+    reference_from_json,
+)
+from aigg.artefacts import (
+    reference_as_json as _reference_json,
+)
 from aigg.canonical import EvidenceAnchor
 from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
 
@@ -219,7 +228,7 @@ class CalendarTemporalResolver:
         )
         if match is None:
             if (
-                context.expression.text == "next April"
+                context.expression.text in {"next April", "the following April"}
                 and context.reference_time is not None
             ):
                 year = context.reference_time.date().year
@@ -230,7 +239,7 @@ class CalendarTemporalResolver:
                     context.expression,
                     TemporalConstraint.during(start, end),
                     "reference-calendar",
-                    "The reference time establishes which April is next.",
+                    "The reference time establishes which April the expression names.",
                 )
             return UnresolvedTemporalExpression(
                 context.expression,
@@ -695,16 +704,22 @@ def _resolution_from_structured(
         "rationale",
     }:
         evidence = _model_evidence(value["evidence"], context)
-        contextual_evidence = _context_evidence(context)
-        if not set(evidence).intersection(contextual_evidence):
-            msg = "Relative temporal resolution must cite Source or graph Evidence."
-            raise TemporalResolutionValidationError(msg)
         constraint = TemporalConstraint.from_json(value["constraint"])
-        if constraint not in _supported_constraints(context):
+        supporting_records = _contextual_constraints(context)
+        if not any(
+            candidate == constraint and set(evidence).issubset(record_evidence)
+            for candidate, record_evidence in supporting_records
+        ):
             msg = (
-                "Temporal resolution constraint must match a comparable constraint "
-                "retained in Source or graph context."
+                "Temporal resolution must cite the contextual Evidence that supports "
+                "its selected constraint."
             )
+            raise TemporalResolutionValidationError(msg)
+        if any(
+            _is_strictly_stronger(candidate, constraint)
+            for candidate, _record_evidence in supporting_records
+        ):
+            msg = "Temporal resolution must select the strongest supported constraint."
             raise TemporalResolutionValidationError(msg)
         return ResolvedTemporalExpression(
             context.expression,
@@ -733,43 +748,61 @@ def _model_evidence(
         evidence = tuple(EvidenceAnchor.from_json(anchor) for anchor in value)
     except ValueError as error:
         raise TemporalResolutionValidationError(str(error)) from error
-    available = set(context.expression.evidence).union(_context_evidence(context))
+    contextual_evidence = set().union(
+        *(
+            record_evidence
+            for _constraint, record_evidence in _contextual_constraints(context)
+        )
+    )
+    available = set(context.expression.evidence).union(contextual_evidence)
     if not set(evidence).issubset(available):
         msg = "Temporal resolution evidence is absent from the bounded context."
         raise TemporalResolutionValidationError(msg)
     return evidence
 
 
-def _context_evidence(
+def _contextual_constraints(
     context: TemporalResolutionContext,
-) -> set[EvidenceAnchor]:
-    """Return every Evidence anchor retained by Source and graph context items."""
-    evidence: set[EvidenceAnchor] = set()
+) -> tuple[tuple[TemporalConstraint, set[EvidenceAnchor]], ...]:
+    """Return each comparable contextual constraint with its own Evidence."""
+    records: list[tuple[TemporalConstraint, set[EvidenceAnchor]]] = []
     for item in (*context.source_context, *context.graph_context):
         raw_evidence = item.get("evidence")
-        if raw_evidence is None:
+        raw_constraint = item.get("constraint")
+        if raw_evidence is None and raw_constraint is None:
             continue
+        if raw_evidence is None or raw_constraint is None:
+            msg = "Temporal contextual constraints must retain their Evidence."
+            raise TemporalResolutionValidationError(msg)
         if not isinstance(raw_evidence, list) or not raw_evidence:
-            msg = "Temporal context Evidence must be a non-empty list."
+            msg = "Temporal contextual constraint Evidence must be a non-empty list."
             raise TemporalResolutionValidationError(msg)
         try:
-            evidence.update(EvidenceAnchor.from_json(anchor) for anchor in raw_evidence)
+            evidence = {EvidenceAnchor.from_json(anchor) for anchor in raw_evidence}
         except ValueError as error:
             raise TemporalResolutionValidationError(str(error)) from error
-    return evidence
+        records.append((TemporalConstraint.from_json(raw_constraint), evidence))
+    return tuple(records)
 
 
-def _supported_constraints(
-    context: TemporalResolutionContext,
-) -> set[TemporalConstraint]:
-    """Return comparable constraints explicitly retained with contextual Evidence."""
-    constraints: set[TemporalConstraint] = set()
-    for item in (*context.source_context, *context.graph_context):
-        raw_constraint = item.get("constraint")
-        if raw_constraint is None:
-            continue
-        constraints.add(TemporalConstraint.from_json(raw_constraint))
-    return constraints
+def _is_strictly_stronger(
+    candidate: TemporalConstraint, selected: TemporalConstraint
+) -> bool:
+    """Return whether ``candidate`` is a strictly narrower comparable interval."""
+    if (
+        candidate.lower_bound is None
+        or candidate.upper_bound is None
+        or selected.lower_bound is None
+        or selected.upper_bound is None
+        or type(candidate.lower_bound) is not type(selected.lower_bound)
+        or type(candidate.upper_bound) is not type(selected.upper_bound)
+    ):
+        return False
+    contains = (
+        candidate.lower_bound >= selected.lower_bound
+        and candidate.upper_bound <= selected.upper_bound
+    )
+    return contains and candidate != selected
 
 
 def _validated_structured_output(
@@ -780,37 +813,9 @@ def _validated_structured_output(
     return value
 
 
-def _reference_json(
-    reference: ArtefactReference | None,
-) -> dict[str, str] | None:
-    """Return one optional artefact reference in durable form."""
-    if reference is None:
-        return None
-    return {
-        "identity": reference.identity,
-        "kind": reference.kind,
-        "schema_version": reference.schema_version,
-    }
-
-
 def _reference_from_json(value: JsonValue) -> ArtefactReference | None:
     """Parse one optional artefact reference before following it."""
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {
-        "identity",
-        "kind",
-        "schema_version",
-    }:
-        msg = "Temporal resolution contains an invalid artefact reference."
-        raise TemporalResolutionValidationError(msg)
-    identity = value["identity"]
-    kind = value["kind"]
-    schema_version = value["schema_version"]
-    if not all(isinstance(item, str) for item in (identity, kind, schema_version)):
-        msg = "Temporal resolution artefact reference fields must be strings."
-        raise TemporalResolutionValidationError(msg)
-    if not identity.startswith("sha256:") or len(identity) != 71:
-        msg = "Temporal resolution artefact reference has an invalid identity."
-        raise TemporalResolutionValidationError(msg)
-    return ArtefactReference(kind, identity.removeprefix("sha256:"), schema_version)
+    try:
+        return reference_from_json(value)
+    except ArtefactIntegrityError as error:
+        raise TemporalResolutionValidationError(str(error)) from error

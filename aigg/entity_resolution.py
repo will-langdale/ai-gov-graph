@@ -7,7 +7,16 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Literal, Protocol, TypeAlias
 
-from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
+from aigg.artefacts import (
+    ArtefactIntegrityError,
+    ArtefactReference,
+    ArtefactStore,
+    JsonValue,
+    reference_from_json,
+)
+from aigg.artefacts import (
+    reference_as_json as _reference_json,
+)
 from aigg.canonical import EvidenceAnchor
 from aigg.open_extraction import ExtractedMention
 from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
@@ -584,38 +593,12 @@ def _outcome_json(outcome: ResolutionOutcome | None) -> dict[str, JsonValue] | N
     return {"kind": "unresolved", **output}
 
 
-def _reference_json(reference: ArtefactReference | None) -> dict[str, str] | None:
-    """Return a durable history-link reference."""
-    if reference is None:
-        return None
-    return {
-        "identity": reference.identity,
-        "kind": reference.kind,
-        "schema_version": reference.schema_version,
-    }
-
-
 def _reference_from_json(value: JsonValue) -> ArtefactReference | None:
     """Parse one optional predecessor reference before following it."""
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {
-        "identity",
-        "kind",
-        "schema_version",
-    }:
-        msg = "Entity history contains an invalid predecessor reference."
-        raise EntityResolutionValidationError(msg)
-    identity = value["identity"]
-    kind = value["kind"]
-    schema_version = value["schema_version"]
-    if not all(isinstance(field, str) for field in (identity, kind, schema_version)):
-        msg = "Entity history predecessor fields must be strings."
-        raise EntityResolutionValidationError(msg)
-    if not identity.startswith("sha256:") or len(identity) != 71:
-        msg = "Entity history predecessor has an invalid identity."
-        raise EntityResolutionValidationError(msg)
-    return ArtefactReference(kind, identity.removeprefix("sha256:"), schema_version)
+    try:
+        return reference_from_json(value)
+    except ArtefactIntegrityError as error:
+        raise EntityResolutionValidationError(str(error)) from error
 
 
 def _decision_from_json(value: JsonValue) -> EntityDecision:
