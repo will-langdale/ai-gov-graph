@@ -128,6 +128,9 @@ def run(
     ],
 ) -> None:
     """Project retained Source documents into a named RDF graph."""
+    if dataset_path.resolve().is_relative_to(corpus_directory.resolve()):
+        msg = "Dataset path must be outside the immutable evidence corpus."
+        raise typer.BadParameter(msg, param_hint="--dataset-path")
     try:
         source_documents = _read_source_documents(corpus_directory)
     except ValueError as error:

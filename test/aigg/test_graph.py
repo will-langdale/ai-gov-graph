@@ -274,6 +274,39 @@ def test_source_document_graph_projection_manifest_boundary(tmp_path: Path) -> N
     assert not dataset_path.exists()
 
 
+def test_source_document_graph_projection_output_boundary(tmp_path: Path) -> None:
+    """A projection cannot overwrite an immutable source JSON document.
+
+    Guards the evidence corpus from a dataset path that would replace retained
+    source bytes.
+    """
+    source: dict[str, object] = {
+        "base_path": "/guidance/example",
+        "content_id": "document-id",
+        "locale": "en",
+        "updated_at": "2026-08-16T10:00:00.000+00:00",
+    }
+    corpus_directory = _write_corpus(tmp_path, source)
+    source_path = next((corpus_directory / "source-documents").iterdir())
+    original_source = source_path.read_bytes()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "documents",
+            "run",
+            "--corpus-directory",
+            str(corpus_directory),
+            "--dataset-path",
+            str(source_path),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "outside" in result.output
+    assert source_path.read_bytes() == original_source
+
+
 def _write_corpus(tmp_path: Path, source: dict[str, object]) -> Path:
     """Create one complete, manifest-backed source corpus fixture."""
     corpus_directory = tmp_path / "corpus"
