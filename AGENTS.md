@@ -6,6 +6,10 @@ Write in British English. Use sentence case headings. Write plain English for a 
 
 Keep sentences direct and simple. Use semicolons, colons and hyphens only when they reduce complexity.
 
+## Scope
+
+Follow YAGNI principles. Implement only behaviour the active request requires.
+
 ## Tests
 
 When adding or changing tests, read [the testing guide](docs/testing.md). Use the terms in [the glossary](docs/glossary.md) in test names and test case IDs.
