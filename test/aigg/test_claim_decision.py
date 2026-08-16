@@ -76,7 +76,8 @@ def test_claim_decision_accepted_exact_replay(tmp_path: Path) -> None:
         ModelConfiguration("openrouter", "example/model", {"temperature": 0}),
         maximum_attempts=1,
     )
-    request = service.create_request(_context())
+    context = _context(store)
+    request = service.create_request(context)
 
     recorded = service.decide_request(request)
     replay_model = StaticModel({}, [])
@@ -88,7 +89,7 @@ def test_claim_decision_accepted_exact_replay(tmp_path: Path) -> None:
     ).decide_request(request, replay=recorded.reference)
 
     assert recorded.mapping.disposition is ClaimDisposition.ACCEPTED
-    assert recorded.mapping.candidate == _context().candidate
+    assert recorded.mapping.candidate == context.candidate
     assert replayed.mapping == recorded.mapping
     assert replay_model.calls == []
 
@@ -99,8 +100,9 @@ def test_claim_decision_non_accepted_outcome(tmp_path: Path) -> None:
     Guards an unresolved mapping requirement from being represented as a failed
     reasoning invocation or an accepted assertion.
     """
+    store = ArtefactStore(tmp_path / "artefacts")
     service = ClaimDecisionService(
-        ArtefactStore(tmp_path / "artefacts"),
+        store,
         StaticModel(
             {
                 "acceptance": "The Claim awaits Ontology review.",
@@ -117,7 +119,7 @@ def test_claim_decision_non_accepted_outcome(tmp_path: Path) -> None:
         maximum_attempts=1,
     )
 
-    recorded = service.decide_request(service.create_request(_context()))
+    recorded = service.decide_request(service.create_request(_context(store)))
 
     assert recorded.mapping.disposition is ClaimDisposition.ONTOLOGY_GAP
     assert recorded.mapping.semantic_assertions == ()
@@ -135,15 +137,16 @@ def test_claim_decision_rejects_unbounded_model_evidence(tmp_path: Path) -> None
         },
         [],
     )
+    store = ArtefactStore(tmp_path / "artefacts")
     service = ClaimDecisionService(
-        ArtefactStore(tmp_path / "artefacts"),
+        store,
         model,
         ModelConfiguration("openrouter", "example/model", {"temperature": 0}),
         maximum_attempts=1,
     )
 
     with pytest.raises(ReasoningValidationError):
-        service.decide_request(service.create_request(_context()))
+        service.decide_request(service.create_request(_context(store)))
 
     structured_input = model.calls[0]
     assert isinstance(structured_input, dict)
@@ -159,7 +162,7 @@ def test_claim_decision_rejects_unbounded_model_evidence(tmp_path: Path) -> None
     }
 
 
-def test_claim_change_validation_shacl_diagnostics() -> None:
+def test_claim_change_validation_shacl_diagnostics(tmp_path: Path) -> None:
     """A proposed assertion that breaks SHACL retains constraint diagnostics.
 
     Guards a SHACL failure from being reported as a model or workflow failure.
@@ -167,6 +170,7 @@ def test_claim_change_validation_shacl_diagnostics() -> None:
     mapping = _accepted_mapping("available")
     assessment = ClaimChangeValidator().assess(
         _context(
+            ArtefactStore(tmp_path / "artefacts"),
             shacl_turtle=(
                 "@prefix example: <https://example.test/> .\n"
                 "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
@@ -183,14 +187,17 @@ def test_claim_change_validation_shacl_diagnostics() -> None:
     assert assessment.conflict_diagnostics == ()
 
 
-def test_claim_change_validation_conflict_diagnostics() -> None:
+def test_claim_change_validation_conflict_diagnostics(tmp_path: Path) -> None:
     """An incompatible overlapping assertion retains its conflicting Claim ID.
 
     Guards two source-supported Claims from being treated as a provider failure
     merely because they make incompatible statements about the same property.
     """
     assessment = ClaimChangeValidator().assess(
-        _context(accepted_mappings=(_accepted_mapping("closed"),)),
+        _context(
+            ArtefactStore(tmp_path / "artefacts"),
+            accepted_mappings=(_accepted_mapping("closed"),),
+        ),
         _accepted_mapping("available"),
     )
 
@@ -203,6 +210,7 @@ def test_claim_change_validation_conflict_diagnostics() -> None:
 
 
 def _context(
+    store: ArtefactStore,
     *,
     accepted_mappings: tuple[ClaimMapping, ...] = (),
     shacl_turtle: str | None = None,
@@ -216,8 +224,18 @@ def _context(
             (_evidence(),),
             "The source states that the scheme is available.",
         ),
-        entity_decisions=({"kind": "existing", "entity_id": "entity:scheme"},),
-        temporal_decisions=({"kind": "resolved", "expression": "2026"},),
+        entity_decisions=(
+            store.write_json(
+                "entity-resolution",
+                {"history": {}, "reasoning_invocation": {}, "request": {}},
+            ),
+        ),
+        temporal_decisions=(
+            store.write_json(
+                "temporal-resolution",
+                {"outcome": {}, "reasoning_invocation": {}, "request": {}},
+            ),
+        ),
         ontology_turtle=(
             "@prefix example: <https://example.test/> .\n"
             "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"

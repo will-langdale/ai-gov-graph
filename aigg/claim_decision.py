@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
-from typing import cast
 
 from pyshacl import validate as validate_shacl
 from rdflib import Graph, URIRef
@@ -49,8 +47,8 @@ class ClaimDecisionContext:
 
     claim_id: str
     candidate: CandidateClaim
-    entity_decisions: tuple[dict[str, JsonValue], ...]
-    temporal_decisions: tuple[dict[str, JsonValue], ...]
+    entity_decisions: tuple[ArtefactReference, ...]
+    temporal_decisions: tuple[ArtefactReference, ...]
     ontology_turtle: str
     shacl_turtle: str
     accepted_mappings: tuple[ClaimMapping, ...] = ()
@@ -79,16 +77,12 @@ class ClaimDecisionContext:
                 "Accepted knowledge context must contain only accepted Claim mappings."
             )
             raise ClaimDecisionValidationError(msg)
-        object.__setattr__(
-            self,
-            "entity_decisions",
-            _normalise_decisions(self.entity_decisions, "Entity decisions"),
-        )
-        object.__setattr__(
-            self,
-            "temporal_decisions",
-            _normalise_decisions(self.temporal_decisions, "Temporal decisions"),
-        )
+        if any(item.kind != "entity-resolution" for item in self.entity_decisions):
+            msg = "Entity decisions must reference completed Entity resolutions."
+            raise ClaimDecisionValidationError(msg)
+        if any(item.kind != "temporal-resolution" for item in self.temporal_decisions):
+            msg = "Temporal decisions must reference completed temporal resolutions."
+            raise ClaimDecisionValidationError(msg)
 
     def as_json(self) -> dict[str, JsonValue]:
         """Return exactly the bounded model input and durable request record."""
@@ -98,11 +92,11 @@ class ClaimDecisionContext:
             ],
             "candidate": self.candidate.as_json(),
             "claim_id": self.claim_id,
-            "entity_decisions": list(self.entity_decisions),
+            "entity_decisions": [reference_as_json(item) for item in self.entity_decisions],
             "maximum_accepted_context": self.maximum_accepted_context,
             "ontology_turtle": self.ontology_turtle,
             "shacl_turtle": self.shacl_turtle,
-            "temporal_decisions": list(self.temporal_decisions),
+            "temporal_decisions": [reference_as_json(item) for item in self.temporal_decisions],
         }
 
 
@@ -260,6 +254,7 @@ class ClaimDecisionService:
 
     def create_request(self, context: ClaimDecisionContext) -> ArtefactReference:
         """Store one Claim-decision request with no ambient graph access."""
+        self._decision_records(context)
         return self._store.write_json("claim-decision-request", context.as_json())
 
     def decide_request(
@@ -274,7 +269,7 @@ class ClaimDecisionService:
             return self._replay(request, replay)
         invocation = self._runner.run(
             stage=CLAIM_DECISION_STAGE,
-            structured_input=context.as_json(),
+            structured_input=self._structured_input(context),
             validate_output=lambda value: _validated_mapping_output(value, context),
         )
         mapping = _mapping_output_from_json(invocation.output, context)
@@ -333,6 +328,36 @@ class ClaimDecisionService:
             assessment,
             replay,
         )
+
+    def _structured_input(self, context: ClaimDecisionContext) -> dict[str, JsonValue]:
+        """Pass only verified completed decisions, rather than caller JSON, to the model."""
+        structured_input = context.as_json()
+        entity, temporal = self._decision_records(context)
+        structured_input["entity_decisions"] = entity
+        structured_input["temporal_decisions"] = temporal
+        return structured_input
+
+    def _decision_records(
+        self, context: ClaimDecisionContext
+    ) -> tuple[list[JsonValue], list[JsonValue]]:
+        """Read and verify the durable result shapes required by Claim mapping."""
+        entity = [self._store.read_json(item) for item in context.entity_decisions]
+        temporal = [self._store.read_json(item) for item in context.temporal_decisions]
+        if any(
+            not isinstance(item, dict)
+            or set(item) != {"history", "reasoning_invocation", "request"}
+            for item in entity
+        ):
+            msg = "Entity decision is not a completed Entity-resolution result."
+            raise ClaimDecisionValidationError(msg)
+        if any(
+            not isinstance(item, dict)
+            or set(item) != {"outcome", "reasoning_invocation", "request"}
+            for item in temporal
+        ):
+            msg = "Temporal decision is not a completed temporal-resolution result."
+            raise ClaimDecisionValidationError(msg)
+        return entity, temporal
 
 
 def _mapping_output_from_json(
@@ -446,12 +471,8 @@ def _context_from_json(value: JsonValue) -> ClaimDecisionContext:
     return ClaimDecisionContext(
         claim_id=_text(value["claim_id"], "Claim ID"),
         candidate=_candidate_from_json(value["candidate"]),
-        entity_decisions=_decisions_from_json(
-            value["entity_decisions"], "Entity decisions"
-        ),
-        temporal_decisions=_decisions_from_json(
-            value["temporal_decisions"], "Temporal decisions"
-        ),
+        entity_decisions=_references_from_json(value["entity_decisions"], "entity-resolution"),
+        temporal_decisions=_references_from_json(value["temporal_decisions"], "temporal-resolution"),
         ontology_turtle=_text(value["ontology_turtle"], "Active Ontology RDF"),
         shacl_turtle=_text(value["shacl_turtle"], "Active SHACL RDF"),
         accepted_mappings=tuple(claim_mapping_from_json(item) for item in mappings),
@@ -604,26 +625,18 @@ def _constraints_overlap(first: TemporalConstraint, second: TemporalConstraint) 
     return True
 
 
-def _normalise_decisions(
-    decisions: tuple[dict[str, JsonValue], ...], name: str
-) -> tuple[dict[str, JsonValue], ...]:
-    """Copy decision context through JSON so callers cannot mutate a request."""
-    try:
-        copied = json.loads(json.dumps(decisions, allow_nan=False))
-    except (TypeError, ValueError) as error:
-        msg = f"{name} must contain JSON objects."
-        raise ClaimDecisionValidationError(msg) from error
-    return _decisions_from_json(cast(JsonValue, copied), name)
-
-
-def _decisions_from_json(
-    value: JsonValue, name: str
-) -> tuple[dict[str, JsonValue], ...]:
-    """Parse a completed bounded-decision collection without adding context."""
-    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-        msg = f"{name} must be a list of JSON objects."
+def _references_from_json(
+    value: JsonValue, kind: str
+) -> tuple[ArtefactReference, ...]:
+    """Parse a bounded collection of completed decision-result references."""
+    if not isinstance(value, list):
+        msg = "Completed decisions must be a list of durable references."
         raise ClaimDecisionValidationError(msg)
-    return tuple(cast(dict[str, JsonValue], item) for item in value)
+    references = tuple(_required_reference(item, "Completed decision") for item in value)
+    if any(item.kind != kind for item in references):
+        msg = "Completed decision has the wrong durable result kind."
+        raise ClaimDecisionValidationError(msg)
+    return references
 
 
 def _required_reference(value: JsonValue, name: str) -> ArtefactReference:
