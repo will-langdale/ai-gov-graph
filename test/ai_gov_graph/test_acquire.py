@@ -1,17 +1,220 @@
 """Tests for source document acquisition commands."""
 
+from __future__ import annotations
+
+import json
+from hashlib import sha256
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import URLError
+
 from ai_gov_graph.acquire import app
 from typer.testing import CliRunner
 
 
-def test_source_document_acquisition_unimplemented() -> None:
-    """An acquisition command reports its boundary.
+class RecordedResponse:
+    """One recorded response from the external GOV.UK API boundary."""
 
-    Guards against an invisible fetch.
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> RecordedResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        """Return the recorded response bytes exactly as supplied."""
+        return self.body
+
+
+def test_source_document_acquisition_manifest_order(tmp_path: Path) -> None:
+    """A corpus manifest orders source documents by base path.
+
+    Guards against acquisition inheriting an unstable search or filesystem order.
     """
-    result = CliRunner().invoke(app, ["documents", "fetch"])
+    alpha = (
+        b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
+        b'"updated_at":"2026-08-16T10:00:00.000+00:00"}'
+    )
+    zebra = (
+        b'{"base_path":"/zebra","content_id":"zebra-id","locale":"en",'
+        b'"updated_at":"2026-08-16T11:00:00.000+00:00"}'
+    )
+    search = json.dumps(
+        {
+            "results": [
+                {"link": "/zebra"},
+                {"link": "/alpha"},
+            ],
+            "start": 0,
+            "total": 2,
+        }
+    ).encode()
+    responses = iter(
+        [RecordedResponse(search), RecordedResponse(alpha), RecordedResponse(zebra)]
+    )
+    corpus_directory = tmp_path / "corpus"
+
+    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+                "--maximum",
+                "2",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((corpus_directory / "manifest.json").read_text())
+    assert [
+        (document["sequence"], document["base_path"])
+        for document in manifest["source_documents"]
+    ] == [(0, "/alpha"), (1, "/zebra")]
+
+
+def test_source_document_acquisition_source_version(tmp_path: Path) -> None:
+    """A source document version retains the exact Content API response bytes.
+
+    Guards evidence against being attributed to changed or reserialised source JSON.
+    """
+    source = (
+        b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
+        b'"updated_at":"2026-08-16T10:00:00.000+00:00"}'
+    )
+    search = json.dumps(
+        {"results": [{"link": "/alpha"}], "start": 0, "total": 1}
+    ).encode()
+    responses = iter([RecordedResponse(search), RecordedResponse(source)])
+    corpus_directory = tmp_path / "corpus"
+
+    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+                "--maximum",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    source_hash = sha256(source).hexdigest()
+    manifest = json.loads((corpus_directory / "manifest.json").read_text())
+    assert manifest["source_documents"] == [
+        {
+            "base_path": "/alpha",
+            "content_api_url": "https://www.gov.uk/api/content/alpha",
+            "content_id": "alpha-id",
+            "locale": "en",
+            "sequence": 0,
+            "source_json": f"source-documents/{source_hash}.json",
+            "source_json_sha256": source_hash,
+            "source_version": f"content_id:alpha-id:sha256:{source_hash}",
+            "updated_at": "2026-08-16T10:00:00.000+00:00",
+        }
+    ]
+    assert (
+        corpus_directory / f"source-documents/{source_hash}.json"
+    ).read_bytes() == source
+
+
+def test_source_document_acquisition_incomplete_download(tmp_path: Path) -> None:
+    """A failed source download leaves a visible incomplete acquisition record.
+
+    Guards against treating partially acquired evidence as a complete corpus.
+    """
+    alpha = (
+        b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
+        b'"updated_at":"2026-08-16T10:00:00.000+00:00"}'
+    )
+    search = json.dumps(
+        {
+            "results": [
+                {"link": "/alpha"},
+                {"link": "/zebra"},
+            ],
+            "start": 0,
+            "total": 2,
+        }
+    ).encode()
+    responses = iter(
+        [
+            RecordedResponse(search),
+            RecordedResponse(alpha),
+            URLError("source unavailable"),
+        ]
+    )
+    corpus_directory = tmp_path / "corpus"
+
+    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+                "--maximum",
+                "2",
+            ],
+        )
 
     assert result.exit_code == 1
-    assert result.output == (
-        "Document acquisition is not implemented yet. No GOV.UK content was fetched.\n"
-    )
+    assert "Acquisition incomplete. No corpus manifest was written." in result.output
+    assert not (corpus_directory / "manifest.json").exists()
+    failure = json.loads((corpus_directory / "acquisition-failure.json").read_text())
+    assert failure == {
+        "failures": [
+            {
+                "message": "<urlopen error source unavailable>",
+                "source_path": "/zebra",
+                "stage": "download",
+            }
+        ],
+        "schema_version": "1",
+        "status": "incomplete",
+    }
+
+
+def test_source_document_acquisition_existing_manifest(tmp_path: Path) -> None:
+    """An existing corpus manifest is never replaced.
+
+    Guards an already complete experiment from an accidental second acquisition.
+    """
+    corpus_directory = tmp_path / "corpus"
+    corpus_directory.mkdir()
+    manifest_path = corpus_directory / "manifest.json"
+    manifest_path.write_text('{"status":"complete"}\n', encoding="utf-8")
+
+    with patch("ai_gov_graph.acquire.urlopen") as request:
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "Corpus directory is not empty" in result.output
+    assert manifest_path.read_text(encoding="utf-8") == '{"status":"complete"}\n'
+    request.assert_not_called()

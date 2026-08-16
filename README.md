@@ -61,10 +61,19 @@ artefact under the lineage. `lineage.json` records its `sha256:` identity and
 schema versions. Consumers must use `ArtefactStore.read_json()` so the content
 hash is checked before an artefact is used.
 
-The acquisition command family is present at `documents fetch`. It currently
-ends with a clear diagnostic without fetching content:
+Acquire an immutable, manifest-backed evidence corpus for a GOV.UK organisation:
 
 ```shell
-uv run python -m ai_gov_graph.acquire documents fetch
-uv run python -m ai_gov_graph.graph documents run
+uv run python -m ai_gov_graph.acquire documents fetch \
+  --corpus-directory evidence/department-for-business-and-trade \
+  --organisation department-for-business-and-trade \
+  --maximum 100
 ```
+
+The command enumerates the organisation through the GOV.UK Search API, stores
+each Content API response byte-for-byte under its SHA-256 hash, and writes
+`manifest.json` only after every source document has been acquired. The
+manifest records an explicit base-path order and the content ID, locale,
+update time and hash that identify each source version. A non-empty corpus
+directory is refused. Failed acquisitions produce `acquisition-failure.json`
+and no manifest, so partial evidence cannot be mistaken for a complete corpus.
