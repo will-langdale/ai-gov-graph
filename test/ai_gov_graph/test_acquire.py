@@ -122,11 +122,12 @@ def test_source_document_acquisition_source_version(tmp_path: Path) -> None:
     ).read_bytes() == source
 
 
-def test_source_document_acquisition_canonical_text(tmp_path: Path) -> None:
-    """A source document retains its canonical text and immutable identity.
+def test_source_document_acquisition_canonical_manifest(tmp_path: Path) -> None:
+    """A source document records its canonical text identity in the manifest.
 
-    Guards later Evidence validation from relying on a text rendering that was
-    absent from, or different to, the acquired corpus.
+    Guards later Evidence validation from looking up an absent or unversioned
+    canonical text artefact. Recorded responses replace the external GOV.UK API
+    boundary so the acquisition test remains deterministic.
     """
     source = (
         b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
@@ -166,6 +167,42 @@ def test_source_document_acquisition_canonical_text(tmp_path: Path) -> None:
         "canonical_text_sha256": canonical_hash,
         "canonicaliser_version": "1",
     }
+
+
+def test_source_document_acquisition_canonical_text(tmp_path: Path) -> None:
+    """A source document persists the canonical text declared by its manifest.
+
+    Guards Evidence validation from using a changed canonical rendering. Recorded
+    responses replace the external GOV.UK API boundary so this acquisition test
+    remains deterministic.
+    """
+    source = (
+        b'{"base_path":"/alpha","content_id":"alpha-id","locale":"en",'
+        b'"updated_at":"2026-08-16T10:00:00.000+00:00"}'
+    )
+    search = json.dumps(
+        {"results": [{"link": "/alpha"}], "start": 0, "total": 1}
+    ).encode()
+    responses = iter([RecordedResponse(search), RecordedResponse(source)])
+    corpus_directory = tmp_path / "corpus"
+
+    with patch("ai_gov_graph.acquire.urlopen", side_effect=responses):
+        result = CliRunner().invoke(
+            app,
+            [
+                "documents",
+                "fetch",
+                "--corpus-directory",
+                str(corpus_directory),
+                "--organisation",
+                "department-for-business-and-trade",
+                "--maximum",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    canonical_hash = "3d7b21d55cb48e4ae9d7ca9278ddd6771b8c9d0379f58764f5543805ad724ca1"
     assert (corpus_directory / f"canonical-documents/{canonical_hash}.txt").read_text(
         encoding="utf-8"
     ) == (
