@@ -180,7 +180,7 @@ def test_claim_change_validation_shacl_diagnostics(tmp_path: Path) -> None:
                 "    sh:targetNode example:scheme ;\n"
                 "    sh:property [ a sh:PropertyShape ;\n"
                 "        sh:path example:required ; sh:minCount 1 ] .\n"
-            )
+            ),
         ),
         mapping,
     )

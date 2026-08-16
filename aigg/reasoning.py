@@ -15,16 +15,24 @@ from aigg.artefacts import ArtefactReference, ArtefactStore, JsonValue
 
 
 class OpenRouterSettings(BaseSettings):
-    """Local OpenRouter configuration with a non-serialisable API credential."""
+    """Local OpenRouter configuration with bounded requests and a secret credential."""
 
     model: str = "deepseek/deepseek-v4-pro"
     api_key: SecretStr = Field(alias="OPENROUTER_API_KEY", repr=False)
+    timeout_ms: int = Field(default=60_000, ge=1)
+    max_retries: int = Field(default=0, ge=0)
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="OPENROUTER_", extra="ignore"
+    )
 
     def configuration(self, parameters: dict[str, JsonValue]) -> ModelConfiguration:
         """Return durable model identity without copying the API credential."""
-        return ModelConfiguration("openrouter", self.model, parameters)
+        return ModelConfiguration(
+            "openrouter",
+            self.model,
+            {"timeout": self.timeout_ms, "max_retries": self.max_retries} | parameters,
+        )
 
 
 @dataclass(frozen=True)
@@ -181,7 +189,9 @@ class OpenRouterStructuredModel:
         try:
             output = (
                 self._model_factory(configuration.model, dict(configuration.parameters))
-                .with_structured_output(_JSON_OBJECT_SCHEMA, method="json_schema")
+                .with_structured_output(
+                    _structured_output_schema(structured_input), method="json_schema"
+                )
                 .invoke(
                     [
                         ("system", "Return only a JSON value."),
@@ -210,19 +220,37 @@ def _create_openrouter_chat_model(
     model: str, parameters: dict[str, Any], api_key: SecretStr
 ) -> OpenRouterChatModel:
     """Create the LangChain OpenRouter chat model without handling credentials."""
+    chat_model = ChatOpenRouter(
+        model=model,
+        api_key=api_key.get_secret_value(),
+        **parameters,
+    )
+    if parameters.get("max_retries") == 0:
+        # langchain-openrouter omits the SDK retry configuration for zero. The
+        # SDK interprets that omission as its own one-hour retry policy.
+        chat_model.client.sdk_configuration.retry_config = None
     return cast(
         OpenRouterChatModel,
-        ChatOpenRouter(
-            model=model,
-            api_key=api_key.get_secret_value(),
-            **parameters,
-        ),
+        chat_model,
     )
 
 
 def _structured_input_message(structured_input: JsonValue) -> str:
     """Serialise a JSON-compatible reasoning input for the chat model."""
     return json.dumps(structured_input)
+
+
+def _structured_output_schema(structured_input: JsonValue) -> dict[str, Any]:
+    """Return an explicit response schema when one is part of the durable input."""
+    if not isinstance(structured_input, dict):
+        return _JSON_OBJECT_SCHEMA
+    schema = structured_input.get("output_schema")
+    if schema is None:
+        return _JSON_OBJECT_SCHEMA
+    if not isinstance(schema, dict):
+        msg = "Structured-model output_schema must be a JSON object."
+        raise ValueError(msg)
+    return cast(dict[str, Any], schema)
 
 
 OutputValidator: TypeAlias = Callable[[JsonValue], JsonValue]

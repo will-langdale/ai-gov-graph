@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from aigg.artefacts import ArtefactStore, JsonValue
@@ -16,6 +16,7 @@ from aigg.reasoning import (
     ReasoningRunner,
     ReasoningValidationError,
 )
+from pydantic import SecretStr
 
 
 @dataclass
@@ -109,12 +110,39 @@ def test_methodology_openrouter_settings_default_model() -> None:
         _env_file=None,
     )
 
+    configuration = settings.configuration({"temperature": 0})
+
     assert settings.model == "deepseek/deepseek-v4-pro"
-    assert settings.configuration({"temperature": 0}) == ModelConfiguration(
-        "openrouter",
-        "deepseek/deepseek-v4-pro",
-        {"temperature": 0},
+    assert isinstance(settings.api_key, SecretStr)
+    assert configuration.model == "deepseek/deepseek-v4-pro"
+    assert "OPENROUTER_API_KEY" not in configuration.parameters
+
+
+def test_openrouter_settings_bounded_request() -> None:
+    """Local settings bound one model request without hidden SDK retries.
+
+    Guards reasoning workflows from appearing to hang while the client performs
+    long retry back-offs. Uses settings directly because the provider is an
+    external, non-deterministic boundary.
+    """
+    settings = OpenRouterSettings(
+        OPENROUTER_API_KEY="secret",
+        _env_file=None,
     )
+
+    configuration = settings.configuration({"temperature": 0})
+    model = OpenRouterStructuredModel(settings=settings)
+    chat_model = cast(
+        Any, model._model_factory(configuration.model, configuration.parameters)
+    )
+
+    assert configuration.parameters == {
+        "timeout": 60_000,
+        "max_retries": 0,
+        "temperature": 0,
+    }
+    assert chat_model.client.sdk_configuration.timeout_ms == 60_000
+    assert chat_model.client.sdk_configuration.retry_config is None
 
 
 def test_methodology_configured_output() -> None:
@@ -157,6 +185,34 @@ def test_methodology_configured_output() -> None:
             ("human", '{"canonical_text": "The department has a minister."}'),
         ]
     ]
+
+
+def test_methodology_configured_output_schema() -> None:
+    """A reasoning stage can enforce its exact JSON shape at the provider boundary.
+
+    Guards a role-specific structured-output contract from being reduced to the
+    adapter's generic JSON object schema. Uses a static chat model because
+    OpenRouter is an external, non-deterministic boundary.
+    """
+    schema = {
+        "title": "Result",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["result"],
+        "properties": {"result": {"type": "string"}},
+    }
+    chat_model = StaticChatModel({"result": "complete"}, [], [])
+    model = OpenRouterStructuredModel(
+        lambda _model, _parameters: chat_model,
+    )
+
+    output = model.invoke(
+        configuration=ModelConfiguration("openrouter", "example/model", {}),
+        structured_input={"instructions": "Return a result.", "output_schema": schema},
+    )
+
+    assert output == {"result": "complete"}
+    assert chat_model.schemas == [(schema, "json_schema")]
 
 
 @pytest.mark.parametrize(

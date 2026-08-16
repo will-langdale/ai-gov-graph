@@ -31,7 +31,8 @@ from aigg.reasoning import ModelConfiguration, ReasoningRunner, StructuredModel
 from aigg.temporal_resolution import ResolvedTemporalExpression, TemporalConstraint
 
 CLAIM_DECISION_STAGE = "claim-decision"
-CLAIM_DECISION_INSTRUCTIONS = """Map the supplied candidate Claim using only its context.
+CLAIM_DECISION_INSTRUCTIONS = """Map the supplied candidate Claim using only
+its context.
 Return one JSON object with exactly these fields: acceptance, conflict,
 disposition, mapping, scope, semantic_assertions and validation. Each reason
 field is non-empty text. disposition is one of accepted, ontology_gap,
@@ -102,11 +103,15 @@ class ClaimDecisionContext:
             ],
             "candidate": self.candidate.as_json(),
             "claim_id": self.claim_id,
-            "entity_decisions": [reference_as_json(item) for item in self.entity_decisions],
+            "entity_decisions": [
+                reference_as_json(item) for item in self.entity_decisions
+            ],
             "maximum_accepted_context": self.maximum_accepted_context,
             "ontology_turtle": self.ontology_turtle,
             "shacl_turtle": self.shacl_turtle,
-            "temporal_decisions": [reference_as_json(item) for item in self.temporal_decisions],
+            "temporal_decisions": [
+                reference_as_json(item) for item in self.temporal_decisions
+            ],
         }
 
 
@@ -340,7 +345,7 @@ class ClaimDecisionService:
         )
 
     def _structured_input(self, context: ClaimDecisionContext) -> dict[str, JsonValue]:
-        """Pass only verified completed decisions, rather than caller JSON, to the model."""
+        """Pass only verified completed decisions to the model."""
         structured_input = context.as_json()
         entity, temporal = self._decision_records(context)
         structured_input["entity_decisions"] = entity
@@ -482,8 +487,12 @@ def _context_from_json(value: JsonValue) -> ClaimDecisionContext:
     return ClaimDecisionContext(
         claim_id=_text(value["claim_id"], "Claim ID"),
         candidate=_candidate_from_json(value["candidate"]),
-        entity_decisions=_references_from_json(value["entity_decisions"], "entity-resolution"),
-        temporal_decisions=_references_from_json(value["temporal_decisions"], "temporal-resolution"),
+        entity_decisions=_references_from_json(
+            value["entity_decisions"], "entity-resolution"
+        ),
+        temporal_decisions=_references_from_json(
+            value["temporal_decisions"], "temporal-resolution"
+        ),
         ontology_turtle=_text(value["ontology_turtle"], "Active Ontology RDF"),
         shacl_turtle=_text(value["shacl_turtle"], "Active SHACL RDF"),
         accepted_mappings=tuple(claim_mapping_from_json(item) for item in mappings),
@@ -636,14 +645,14 @@ def _constraints_overlap(first: TemporalConstraint, second: TemporalConstraint) 
     return True
 
 
-def _references_from_json(
-    value: JsonValue, kind: str
-) -> tuple[ArtefactReference, ...]:
+def _references_from_json(value: JsonValue, kind: str) -> tuple[ArtefactReference, ...]:
     """Parse a bounded collection of completed decision-result references."""
     if not isinstance(value, list):
         msg = "Completed decisions must be a list of durable references."
         raise ClaimDecisionValidationError(msg)
-    references = tuple(_required_reference(item, "Completed decision") for item in value)
+    references = tuple(
+        _required_reference(item, "Completed decision") for item in value
+    )
     if any(item.kind != kind for item in references):
         msg = "Completed decision has the wrong durable result kind."
         raise ClaimDecisionValidationError(msg)

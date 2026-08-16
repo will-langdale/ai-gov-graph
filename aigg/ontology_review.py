@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Annotated, Literal, Protocol, cast
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aigg.artefacts import (
     ArtefactIntegrityError,
@@ -42,14 +44,138 @@ RESEARCHER_INSTRUCTIONS = (
 PROPOSER_INSTRUCTIONS = (
     "Return exactly a JSON object with conclusion, rationale and assessments. "
     "assessments is a non-empty list of objects with artefact_index, term, "
-    "suitable and rationale. Assess only the supplied vendored artefacts."
+    "suitable and rationale. term is the full expanded absolute IRI from the "
+    "vendored Turtle, never a prefixed name. Assess only the supplied vendored "
+    "artefacts."
 )
 CRITIC_INSTRUCTIONS = "Return exactly a JSON object with one non-empty rationale field."
 SYNTHESISER_INSTRUCTIONS = (
     "Return exactly a JSON object with rationale, ontology_turtle, shacl_turtle, "
     "changes, mapping and reconsideration_reason. changes is a non-empty list of "
-    "term, description, kind and external_terms objects. mapping has acceptance, "
-    "conflict, disposition, mapping, scope, semantic_assertions and validation."
+    "term, description, kind and external_terms objects. kind is exactly "
+    "local_invention or external_reuse. Every external_terms list is non-empty and "
+    "contains exact term IRIs from the supplied assessments. When no assessed term "
+    "is suitable, use local_invention and cite the assessed terms. mapping has "
+    "acceptance, conflict, disposition, mapping, scope, semantic_assertions and "
+    "validation, and must reconsider the gap against the proposed release. When a "
+    "change resolves the gap, mapping uses disposition accepted and supplies the "
+    "resulting semantic assertions. ontology_turtle and shacl_turtle are complete, "
+    "standalone Turtle documents that declare every prefix they use."
+)
+
+_NonEmptyText = Annotated[str, Field(min_length=1)]
+_AbsoluteIri = Annotated[
+    str,
+    Field(min_length=1, pattern=r"^[A-Za-z][A-Za-z0-9+.-]*:"),
+]
+_ExpandedIri = Annotated[
+    str,
+    Field(
+        min_length=1,
+        pattern=r"^[A-Za-z][A-Za-z0-9+.-]*:",
+        description="Full expanded absolute IRI from the artefact, never a CURIE.",
+    ),
+]
+
+
+class _ResearcherOutputModel(BaseModel):
+    """The provider-facing external Ontology research request."""
+
+    model_config = ConfigDict(extra="forbid", title="OntologyReviewResearch")
+
+    query: _NonEmptyText
+    rationale: _NonEmptyText
+
+
+class _AssessmentOutputModel(BaseModel):
+    """One provider-facing external-term assessment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artefact_index: Annotated[int, Field(ge=0)]
+    rationale: _NonEmptyText
+    suitable: bool
+    term: _ExpandedIri
+
+
+class _ProposerOutputModel(BaseModel):
+    """The provider-facing external Ontology proposal."""
+
+    model_config = ConfigDict(extra="forbid", title="OntologyReviewProposal")
+
+    assessments: Annotated[list[_AssessmentOutputModel], Field(min_length=1)]
+    conclusion: _NonEmptyText
+    rationale: _NonEmptyText
+
+
+class _RationaleOutputModel(BaseModel):
+    """One provider-facing rationale decision."""
+
+    model_config = ConfigDict(extra="forbid", title="OntologyReviewRationale")
+
+    rationale: _NonEmptyText
+
+
+class _SynthesisChangeOutput(BaseModel):
+    """One provider-facing Ontology change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: _NonEmptyText
+    external_terms: Annotated[list[_NonEmptyText], Field(min_length=1)]
+    kind: OntologyChangeKind
+    term: _NonEmptyText
+
+
+class _SynthesisAssertionOutput(BaseModel):
+    """One provider-facing semantic assertion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    object: _NonEmptyText
+    object_kind: Literal["iri", "literal"]
+    predicate: _AbsoluteIri
+    subject: _AbsoluteIri
+
+
+class _SynthesisMappingOutput(BaseModel):
+    """The provider-facing reconsidered Claim mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    acceptance: _NonEmptyText
+    conflict: _NonEmptyText
+    disposition: ClaimDisposition
+    mapping: _NonEmptyText
+    scope: _NonEmptyText
+    semantic_assertions: list[_SynthesisAssertionOutput]
+    validation: _NonEmptyText
+
+
+class _SynthesisOutput(BaseModel):
+    """The complete provider-facing Ontology synthesis response."""
+
+    model_config = ConfigDict(extra="forbid", title="OntologyReviewSynthesis")
+
+    changes: Annotated[list[_SynthesisChangeOutput], Field(min_length=1)]
+    mapping: _SynthesisMappingOutput
+    ontology_turtle: _NonEmptyText
+    rationale: _NonEmptyText
+    reconsideration_reason: _NonEmptyText
+    shacl_turtle: _NonEmptyText
+
+
+SYNTHESIS_OUTPUT_SCHEMA = cast(
+    dict[str, JsonValue], _SynthesisOutput.model_json_schema()
+)
+RESEARCHER_OUTPUT_SCHEMA = cast(
+    dict[str, JsonValue], _ResearcherOutputModel.model_json_schema()
+)
+PROPOSER_OUTPUT_SCHEMA = cast(
+    dict[str, JsonValue], _ProposerOutputModel.model_json_schema()
+)
+RATIONALE_OUTPUT_SCHEMA = cast(
+    dict[str, JsonValue], _RationaleOutputModel.model_json_schema()
 )
 
 
@@ -141,6 +267,7 @@ class OntologyReviewService:
                 "instructions": RESEARCHER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
+                "output_schema": RESEARCHER_OUTPUT_SCHEMA,
                 "shacl_turtle": shacl_turtle,
             },
             _validated_research_output,
@@ -159,6 +286,7 @@ class OntologyReviewService:
                 "instructions": PROPOSER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
+                "output_schema": PROPOSER_OUTPUT_SCHEMA,
             },
             _validated_proposal_output,
         )
@@ -183,6 +311,7 @@ class OntologyReviewService:
                 "instructions": CRITIC_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
+                "output_schema": RATIONALE_OUTPUT_SCHEMA,
                 "proposer": self._store.read_json(proposer),
                 "research": self._store.read_json(research),
             },
@@ -195,11 +324,12 @@ class OntologyReviewService:
                 "instructions": SYNTHESISER_INSTRUCTIONS,
                 "ontology_gap": mapping.as_json(),
                 "ontology_turtle": ontology_turtle,
+                "output_schema": SYNTHESIS_OUTPUT_SCHEMA,
                 "proposer": self._store.read_json(proposer),
                 "research": self._store.read_json(research),
                 "shacl_turtle": shacl_turtle,
             },
-            _validated_synthesis_output,
+            lambda value: _validated_synthesis_output(value, mapping),
         )
         synthesis = _synthesis_from_json(synthesis_output, mapping, ontology_gap)
         synthesiser = self._evolution.record_decision(
@@ -362,9 +492,8 @@ class _Synthesis:
 
 
 def _validated_research_output(value: JsonValue) -> JsonValue:
-    """Validate researcher JSON while retaining it unchanged in its invocation."""
-    _research_output_from_json(value)
-    return value
+    """Validate and normalise researcher JSON for its invocation record."""
+    return _validated_model_output(value, _ResearcherOutputModel, "researcher")
 
 
 def _research_output_from_json(value: JsonValue) -> _ResearchOutput:
@@ -380,8 +509,7 @@ def _research_output_from_json(value: JsonValue) -> _ResearchOutput:
 
 def _validated_proposal_output(value: JsonValue) -> JsonValue:
     """Validate proposer research assessment after external retrieval completes."""
-    _proposal_output_from_json(value)
-    return value
+    return _validated_model_output(value, _ProposerOutputModel, "proposer")
 
 
 def _proposal_output_from_json(value: JsonValue) -> _ProposalOutput:
@@ -471,8 +599,18 @@ def _vendored_artefacts_json(
 
 def _validated_rationale_output(value: JsonValue) -> JsonValue:
     """Validate a role rationale while preserving the exact structured output."""
-    _rationale_from_json(value)
-    return value
+    return _validated_model_output(value, _RationaleOutputModel, "decision")
+
+
+def _validated_model_output(
+    value: JsonValue, model: type[BaseModel], role: str
+) -> JsonValue:
+    """Validate and normalise one provider response from its Pydantic contract."""
+    try:
+        return cast(JsonValue, model.model_validate(value).model_dump(mode="json"))
+    except ValidationError as error:
+        msg = f"Ontology {role} output failed schema validation."
+        raise OntologyReviewValidationError(msg) from error
 
 
 def _rationale_from_json(value: JsonValue) -> str:
@@ -483,48 +621,42 @@ def _rationale_from_json(value: JsonValue) -> str:
     return _text(value["rationale"], "Ontology decision rationale")
 
 
-def _validated_synthesis_output(value: JsonValue) -> JsonValue:
+def _validated_synthesis_output(
+    value: JsonValue, ontology_gap: ClaimMapping
+) -> JsonValue:
     """Validate synthesis JSON before creating an immutable-release proposal."""
-    if not isinstance(value, dict) or set(value) != {
-        "changes",
-        "mapping",
-        "ontology_turtle",
-        "rationale",
-        "reconsideration_reason",
-        "shacl_turtle",
-    }:
-        msg = "Ontology synthesiser output has an invalid shape."
-        raise OntologyReviewValidationError(msg)
-    _text(value["ontology_turtle"], "Proposed Ontology RDF")
-    _text(value["shacl_turtle"], "Proposed SHACL RDF")
-    _text(value["rationale"], "Ontology synthesiser rationale")
-    _text(value["reconsideration_reason"], "Claim reconsideration reason")
-    if not isinstance(value["changes"], list) or not value["changes"]:
-        msg = "Ontology synthesis must contain at least one change."
-        raise OntologyReviewValidationError(msg)
-    if not isinstance(value["mapping"], dict):
-        msg = "Ontology synthesis must contain one reconsidered Claim mapping."
-        raise OntologyReviewValidationError(msg)
-    return value
+    try:
+        validated = cast(
+            dict[str, JsonValue],
+            _SynthesisOutput.model_validate(value).model_dump(mode="json"),
+        )
+    except ValidationError as error:
+        msg = "Ontology synthesiser output failed schema validation."
+        raise OntologyReviewValidationError(msg) from error
+    _reconsidered_mapping_from_json(validated["mapping"], ontology_gap)
+    return validated
 
 
 def _synthesis_from_json(
     value: JsonValue, ontology_gap: ClaimMapping, gap_reference: ArtefactReference
 ) -> _Synthesis:
     """Bind a synthesised proposal only to the Claim that prompted review."""
-    _validated_synthesis_output(value)
-    assert isinstance(value, dict)
-    changes = tuple(_change_from_json(item) for item in value["changes"])
-    mapping = _reconsidered_mapping_from_json(value["mapping"], ontology_gap)
+    validated = _validated_synthesis_output(value, ontology_gap)
+    assert isinstance(validated, dict)
+    changes = tuple(_change_from_json(item) for item in validated["changes"])
+    mapping = _reconsidered_mapping_from_json(validated["mapping"], ontology_gap)
     return _Synthesis(
-        _text(value["rationale"], "Ontology synthesiser rationale"),
-        _text(value["ontology_turtle"], "Proposed Ontology RDF"),
-        _text(value["shacl_turtle"], "Proposed SHACL RDF"),
+        _text(validated["rationale"], "Ontology synthesiser rationale"),
+        _text(validated["ontology_turtle"], "Proposed Ontology RDF"),
+        _text(validated["shacl_turtle"], "Proposed SHACL RDF"),
         changes,
         ClaimReconsideration(
             gap_reference,
             mapping,
-            _text(value["reconsideration_reason"], "Claim reconsideration reason"),
+            _text(
+                validated["reconsideration_reason"],
+                "Claim reconsideration reason",
+            ),
         ),
     )
 

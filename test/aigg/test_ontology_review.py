@@ -49,11 +49,11 @@ class StaticExternalOntologyRetriever:
         return self.artefacts
 
 
-def test_ontology_review_accepted(tmp_path: Path) -> None:
-    """An Ontology gap records every role before proposal consideration.
+def test_ontology_review_retries_invalid_synthesis(tmp_path: Path) -> None:
+    """An Ontology gap retries a synthesis without external-term provenance.
 
-    Guards an Ontology revision from bypassing external-term research or any of
-    the researcher, proposer, critic and synthesiser decision records.
+    Guards a synthesis that cannot justify its external terms from escaping the
+    bounded reasoning retry before immutable-release consideration.
     """
     store = ArtefactStore(tmp_path / "artefacts")
     ontology_gap = ClaimMappingService(store).record(_ontology_gap())
@@ -80,6 +80,47 @@ def test_ontology_review_accepted(tmp_path: Path) -> None:
                 "rationale": (
                     "The proposed term does not duplicate a suitable external term."
                 )
+            },
+            {
+                "changes": [
+                    {
+                        "description": "Adds a status predicate for schemes.",
+                        "external_terms": [],
+                        "kind": "local_invention",
+                        "term": "https://example.test/hasStatus",
+                    }
+                ],
+                "mapping": {
+                    "acceptance": "The assertion is ready for projection.",
+                    "conflict": "No conflicting accepted assertion was supplied.",
+                    "disposition": "accepted",
+                    "mapping": "The proposed Ontology supplies the status predicate.",
+                    "scope": "The Claim is in scope.",
+                    "semantic_assertions": [
+                        {
+                            "object": "available",
+                            "object_kind": "literal",
+                            "predicate": "https://example.test/hasStatus",
+                            "subject": "https://example.test/scheme",
+                        }
+                    ],
+                    "validation": "The assertion satisfies the proposed SHACL release.",
+                },
+                "ontology_turtle": (
+                    "@prefix example: <https://example.test/> .\n"
+                    "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+                    "example:hasStatus a owl:DatatypeProperty .\n"
+                ),
+                "rationale": (
+                    "The reviewed change is ready for immutable-release validation."
+                ),
+                "reconsideration_reason": "The new predicate represents the gap Claim.",
+                "shacl_turtle": (
+                    "@prefix example: <https://example.test/> .\n"
+                    "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+                    "example:SchemeShape a sh:NodeShape ; "
+                    "sh:targetNode example:scheme .\n"
+                ),
             },
             {
                 "changes": [
@@ -130,7 +171,7 @@ def test_ontology_review_accepted(tmp_path: Path) -> None:
         model,
         ModelConfiguration("openrouter", "example/model", {"temperature": 0}),
         retriever,
-        maximum_attempts=1,
+        maximum_attempts=2,
     )
     request = service.create_request(
         ontology_gap.reference,
@@ -154,7 +195,7 @@ def test_ontology_review_accepted(tmp_path: Path) -> None:
 
     assert recorded.outcome.accepted
     assert replayed.outcome == recorded.outcome
-    assert len(model.calls) == 4
+    assert len(model.calls) == 5
     assert all(
         isinstance(call, dict) and "instructions" in call for call in model.calls
     )

@@ -51,6 +51,15 @@ uv run aigg acquire documents fetch \
 The corpus directory must not already contain files. The command needs network
 access to the GOV.UK APIs but does not require an LLM credential.
 
+## Reasoning configuration
+
+Live reasoning loads its OpenRouter credential only from
+`OPENROUTER_API_KEY`. The default model is `deepseek/deepseek-v4-pro`. Each
+provider request has a 60-second network timeout and no SDK retries, so a
+provider failure cannot enter the SDK's long retry back-off. Set
+`OPENROUTER_MODEL`, `OPENROUTER_TIMEOUT_MS` or `OPENROUTER_MAX_RETRIES` in the
+environment to override these defaults.
+
 ## 🧭 CLI at a glance
 
 The project keeps its workflows in separate command line applications so that
