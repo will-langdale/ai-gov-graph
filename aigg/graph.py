@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
@@ -30,6 +31,18 @@ SOURCE_KEY = NamedNode(f"{AIGG}sourceKey")
 SOURCE_VALUE = NamedNode(f"{AIGG}sourceValue")
 SOURCE_JSON = NamedNode(f"{AIGG}sourceJson")
 SOURCE_VERSION = NamedNode(f"{AIGG}sourceVersion")
+
+
+@dataclass(frozen=True)
+class RetainedSourceDocument:
+    """One manifest-listed source version and its unchanged JSON bytes."""
+
+    content_id: str
+    source: dict[str, object]
+    source_bytes: bytes
+    source_json_sha256: str
+    source_version: str
+
 
 app = typer.Typer(
     help="Run graph construction against locally acquired evidence.",
@@ -129,7 +142,7 @@ def run(
 
 def _read_source_documents(
     corpus_directory: Path,
-) -> list[tuple[dict[str, object], bytes]]:
+) -> list[RetainedSourceDocument]:
     """Read the retained source versions listed in one complete corpus manifest."""
     manifest_path = corpus_directory / "manifest.json"
     try:
@@ -149,24 +162,34 @@ def _read_source_documents(
         msg = f"Corpus manifest has no source documents: {manifest_path}"
         raise ValueError(msg)
 
-    source_documents: list[tuple[dict[str, object], bytes]] = []
+    source_documents: list[RetainedSourceDocument] = []
     for entry in entries:
         if not isinstance(entry, dict):
             msg = "Corpus manifest contains an invalid source document entry."
             raise ValueError(msg)
-        source_documents.append((entry, _read_source_document(corpus_directory, entry)))
+        source_documents.append(_read_source_document(corpus_directory, entry))
     return source_documents
 
 
-def _read_source_document(corpus_directory: Path, entry: dict[str, object]) -> bytes:
+def _read_source_document(
+    corpus_directory: Path,
+    entry: dict[str, object],
+) -> RetainedSourceDocument:
     """Read and verify one immutable source JSON document from a manifest entry."""
     source_json = entry.get("source_json")
     source_json_sha256 = entry.get("source_json_sha256")
-    if not isinstance(source_json, str) or not isinstance(source_json_sha256, str):
+    content_id = entry.get("content_id")
+    source_version = entry.get("source_version")
+    if (
+        not isinstance(source_json, str)
+        or not isinstance(source_json_sha256, str)
+        or not isinstance(content_id, str)
+        or not isinstance(source_version, str)
+    ):
         msg = "Corpus manifest source document lacks its JSON identity."
         raise ValueError(msg)
     path = corpus_directory / source_json
-    if not path.is_relative_to(corpus_directory):
+    if not path.resolve().is_relative_to(corpus_directory.resolve()):
         msg = "Corpus manifest source document escapes the corpus directory."
         raise ValueError(msg)
     try:
@@ -177,35 +200,52 @@ def _read_source_document(corpus_directory: Path, entry: dict[str, object]) -> b
     if sha256(source).hexdigest() != source_json_sha256:
         msg = f"Retained source document does not match its manifest identity: {path}"
         raise ValueError(msg)
-    return source
+    source_document = _parse_source_document(source)
+    if source_document.get("content_id") != content_id:
+        msg = (
+            "Retained source document content ID does not match its manifest identity."
+        )
+        raise ValueError(msg)
+    expected_source_version = f"content_id:{content_id}:sha256:{source_json_sha256}"
+    if source_version != expected_source_version:
+        msg = "Retained source document version does not match its manifest identity."
+        raise ValueError(msg)
+    return RetainedSourceDocument(
+        content_id=content_id,
+        source=source_document,
+        source_bytes=source,
+        source_json_sha256=source_json_sha256,
+        source_version=source_version,
+    )
 
 
 def _source_document_quads(
-    source_documents: list[tuple[dict[str, object], bytes]],
+    source_documents: list[RetainedSourceDocument],
 ) -> list[Quad]:
     """Return the source assertions for every retained Source document version."""
     quads: list[Quad] = []
-    for entry, source_bytes in source_documents:
-        source = _parse_source_document(source_bytes)
-        document = _document_node(entry)
+    for source_document in source_documents:
+        document = _document_node(source_document)
         quads.extend(
             [
                 Quad(document, RDF_TYPE, SOURCE_DOCUMENT, DOCUMENTS_GRAPH),
                 Quad(
                     document,
                     SOURCE_JSON,
-                    Literal(source_bytes.decode("utf-8"), datatype=RDF_JSON),
+                    Literal(
+                        source_document.source_bytes.decode("utf-8"), datatype=RDF_JSON
+                    ),
                     DOCUMENTS_GRAPH,
                 ),
                 Quad(
                     document,
                     SOURCE_VERSION,
-                    Literal(_source_version(entry)),
+                    Literal(source_document.source_version),
                     DOCUMENTS_GRAPH,
                 ),
             ]
         )
-        for key, value in source.items():
+        for key, value in source_document.source.items():
             assertion = NamedNode(f"{document.value}/assertion/{quote(key, safe='')}")
             quads.extend(
                 [
@@ -241,25 +281,12 @@ def _parse_source_document(source_bytes: bytes) -> dict[str, object]:
     return source
 
 
-def _document_node(entry: dict[str, object]) -> NamedNode:
+def _document_node(source_document: RetainedSourceDocument) -> NamedNode:
     """Return the stable RDF resource for one immutable Source document version."""
-    content_id = entry.get("content_id")
-    source_json_sha256 = entry.get("source_json_sha256")
-    if not isinstance(content_id, str) or not isinstance(source_json_sha256, str):
-        msg = "Corpus manifest source document lacks its RDF identity."
-        raise ValueError(msg)
     return NamedNode(
-        f"{AIGG}source-document/{quote(content_id, safe='')}/{source_json_sha256}"
+        f"{AIGG}source-document/{quote(source_document.content_id, safe='')}/"
+        f"{source_document.source_json_sha256}"
     )
-
-
-def _source_version(entry: dict[str, object]) -> str:
-    """Return the manifest's immutable source-version identifier."""
-    source_version = entry.get("source_version")
-    if not isinstance(source_version, str):
-        msg = "Corpus manifest source document lacks its source version."
-        raise ValueError(msg)
-    return source_version
 
 
 def _reference_data(reference: ArtefactReference) -> dict[str, str]:

@@ -4,6 +4,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
 from aigg.graph import app
 from pyoxigraph import NamedNode, QuerySolutions, RdfFormat, Store
 from typer.testing import CliRunner
@@ -183,6 +184,94 @@ def test_source_document_graph_projection_source_classifications(
         ("schema_name", '"guide"'),
         ("taxons", '[{"base_path":"/topic/example"}]'),
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("content_id", "other-document", id="content_id"),
+        pytest.param(
+            "source_version", "content_id:document-id:sha256:other", id="version"
+        ),
+    ],
+)
+def test_source_document_graph_projection_identity(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """A manifest cannot assign a retained Source document a false identity.
+
+    Guards authoritative source identity from a malformed manifest that still
+    references the retained JSON bytes.
+    """
+    source: dict[str, object] = {
+        "base_path": "/guidance/example",
+        "content_id": "document-id",
+        "locale": "en",
+        "updated_at": "2026-08-16T10:00:00.000+00:00",
+    }
+    corpus_directory = _write_corpus(tmp_path, source)
+    manifest_path = corpus_directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_documents"][0][field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    dataset_path = tmp_path / "source-documents.trig"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "documents",
+            "run",
+            "--corpus-directory",
+            str(corpus_directory),
+            "--dataset-path",
+            str(dataset_path),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "identity" in result.output
+    assert not dataset_path.exists()
+
+
+def test_source_document_graph_projection_manifest_boundary(tmp_path: Path) -> None:
+    """A manifest cannot include JSON from outside its evidence corpus.
+
+    Guards graph construction from reading arbitrary local evidence through a
+    relative traversal path.
+    """
+    source: dict[str, object] = {
+        "base_path": "/guidance/example",
+        "content_id": "document-id",
+        "locale": "en",
+        "updated_at": "2026-08-16T10:00:00.000+00:00",
+    }
+    corpus_directory = _write_corpus(tmp_path, source)
+    outside_source = tmp_path / "outside.json"
+    source_bytes = _source_bytes(source)
+    outside_source.write_bytes(source_bytes)
+    manifest_path = corpus_directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_documents"][0]["source_json"] = "../outside.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    dataset_path = tmp_path / "source-documents.trig"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "documents",
+            "run",
+            "--corpus-directory",
+            str(corpus_directory),
+            "--dataset-path",
+            str(dataset_path),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "escapes" in result.output
+    assert not dataset_path.exists()
 
 
 def _write_corpus(tmp_path: Path, source: dict[str, object]) -> Path:
