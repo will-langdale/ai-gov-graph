@@ -37,3 +37,34 @@ The first experiment will process about 100 heterogeneous pages from one GOV.UK 
 - [ ] Verify the graph can be rebuilt entirely from version controlled artefacts
 
 The detailed architecture, experimental questions and spike programme live in the [design document](docs/plans/ai-gov-graph.md).
+
+## Commands
+
+The project has separate command line interfaces for acquiring source documents
+and constructing a graph from local evidence:
+
+```shell
+uv run python -m ai_gov_graph.acquire --help
+uv run python -m ai_gov_graph.graph --help
+```
+
+Initialise a graph experiment lineage from a JSON configuration object:
+
+```shell
+uv run python -m ai_gov_graph.graph experiment initialise \
+  --lineage-directory lineages/first-run \
+  --configuration configuration.json
+```
+
+Initialisation records the configuration as a schema-versioned, content-addressed
+artefact under the lineage. `lineage.json` records its `sha256:` identity and
+schema versions. Consumers must use `ArtefactStore.read_json()` so the content
+hash is checked before an artefact is used.
+
+The acquisition command family is present at `documents fetch`. It currently
+ends with a clear diagnostic without fetching content:
+
+```shell
+uv run python -m ai_gov_graph.acquire documents fetch
+uv run python -m ai_gov_graph.graph documents run
+```
